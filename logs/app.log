@@ -1,0 +1,3 @@
+2026-05-12 11:19:25.812 | INFO     | src.infrastructure.logging.loguru_logger:info:11 - Application starting...
+2026-05-12 11:19:25.813 | INFO     | src.infrastructure.logging.loguru_logger:info:11 - Environment: development
+2026-05-12 11:19:25.814 | INFO     | src.infrastructure.logging.loguru_logger:info:11 - Model: gpt-4.1-mini
