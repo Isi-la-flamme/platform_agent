@@ -4,6 +4,7 @@ from src.config.settings import get_settings
 from src.infrastructure.logging.loguru_logger import LoguruLogger
 from src.infrastructure.llm.openai_provider import OpenAIProvider
 from src.infrastructure.llm.groq_provider import GroqProvider
+from src.application.orchestrators.agent_runtime import AgentRuntime
 
 
 class Container(containers.DeclarativeContainer):
@@ -42,3 +43,8 @@ class Container(containers.DeclarativeContainer):
             logger=logger,
         ),
     )
+    agent_runtime = providers.Factory(
+    AgentRuntime,
+    llm=llm_provider,
+    logger=logger,
+)

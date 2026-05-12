@@ -7,13 +7,13 @@ async def main() -> None:
 
     container = Container()
 
-    logger = container.logger()
-    llm = container.llm_provider()
+    agent = container.agent_runtime()
 
-    logger.info("Testing Groq/OpenAI provider...")
+    response1 = await agent.run("Qui es-tu ?")
+    print(response1)
 
-    response = await llm.generate("Explique Python en une phrase.")
-    logger.info(response)
+    response2 = await agent.run("Explique Python simplement")
+    print(response2)
 
 
 if __name__ == "__main__":
