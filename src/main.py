@@ -1,5 +1,12 @@
+from src.config.settings import get_settings
+
+
 async def main() -> None:
-    print("Agent Platform Booting...")
+    settings = get_settings()
+
+    print(settings.APP_NAME)
+    print(settings.APP_ENV)
+    print(settings.OPENAI_MODEL)
 
 
 if __name__ == "__main__":
