@@ -1,17 +1,17 @@
+from src.config.container import Container
 from src.config.logging import setup_logging
-from src.config.settings import get_settings
-from src.infrastructure.logging.loguru_logger import LoguruLogger
 
 
 async def main() -> None:
     setup_logging()
 
-    settings = get_settings()
+    container = Container()
 
-    logger = LoguruLogger()
+    settings = container.settings()
+    logger = container.logger()
 
-    logger.info("Application starting...")
-    logger.info(f"Environment: {settings.APP_ENV}")
+    logger.info("System booting...")
+    logger.info(f"Env: {settings.APP_ENV}")
     logger.info(f"Model: {settings.OPENAI_MODEL}")
 
 
