@@ -7,15 +7,15 @@ async def main() -> None:
 
     container = Container()
 
-    settings = container.settings()
     logger = container.logger()
+    llm = container.llm_provider()
 
-    logger.info("System booting...")
-    logger.info(f"Env: {settings.APP_ENV}")
-    logger.info(f"Model: {settings.OPENAI_MODEL}")
+    logger.info("Testing Groq/OpenAI provider...")
+
+    response = await llm.generate("Explique Python en une phrase.")
+    logger.info(response)
 
 
 if __name__ == "__main__":
     import asyncio
-
     asyncio.run(main())

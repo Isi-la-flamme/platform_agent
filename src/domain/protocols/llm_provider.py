@@ -1,0 +1,15 @@
+from typing import Protocol, Any
+
+
+class LLMProvider(Protocol):
+    async def generate(self, prompt: str) -> str:
+        ...
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        ...
+
+    async def stream(self, messages: list[dict[str, str]]) -> Any:
+        ...
+
+    async def close(self) -> None:
+        ...

@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     def is_testing(self) -> bool:
         return self.APP_ENV == Environment.TESTING
 
+    GROQ_API_KEY: SecretStr = Field(default=SecretStr(""))
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
