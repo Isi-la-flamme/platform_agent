@@ -1,30 +1,38 @@
 import json
+import re
 from typing import Any
 
 from src.domain.entities.agent import AgentState
 from src.domain.entities.message import Message
 from src.domain.protocols.llm_provider import LLMProvider
 from src.domain.protocols.logger import LoggerProtocol
-from src.domain.protocols.tool import ToolProvider
+from src.domain.protocols.tool import Tool, ToolProvider
 
 SYSTEM_PROMPT = """
 Tu es un agent logiciel.
 
 Tu peux :
-- appeler des tools
-- ou repondre directement
+- appeler un tool disponible
+- repondre directement
 - discuter normalement avec l'utilisateur
+
+STYLE :
+- Reponds en francais naturel.
+- Sois clair, court et utile.
+- Ne dis pas que tu es "aux ordres".
+- Si tu ne sais pas une information personnelle, dis simplement que tu ne l'as
+  pas encore.
 
 TOOLS DISPONIBLES :
 __TOOLS__
 
-REGLE ABSOLUE :
-Tu dois repondre uniquement en JSON valide.
-Tu dois appeler uniquement un tool liste dans TOOLS DISPONIBLES.
-Si aucun tool disponible ne correspond, utilise le tool "final".
-Pour une salutation ou une conversation simple, utilise toujours "final".
-N'utilise pas le tool "echo" sauf si l'utilisateur demande explicitement
-de repeter, echo, ou retourner exactement un texte.
+REGLES ABSOLUES :
+- Tu dois repondre uniquement en JSON valide.
+- Tu ne dois jamais ajouter de markdown, texte, explication ou bloc code hors JSON.
+- Tu dois appeler uniquement un tool liste dans TOOLS DISPONIBLES.
+- Si aucun tool disponible ne correspond, utilise le tool "final".
+- Pour une salutation ou une conversation simple, utilise toujours "final".
+- N'utilise un tool que si cela aide vraiment a repondre a la demande.
 
 FORMAT 1 (appel tool) :
 {
@@ -65,15 +73,24 @@ class AgentRuntime:
     def _trim_history(self) -> None:
         self.state.messages = self.state.messages[-self.MAX_MESSAGES :]
 
+    def _format_tool(self, tool: Tool) -> str:
+        args = ", ".join(
+            f"{name}: {description}"
+            for name, description in tool.args_schema.items()
+        )
+        if not args:
+            args = "aucun argument"
+
+        behavior = "retour direct" if tool.return_direct else "observation"
+        return f"- {tool.name}: {tool.description} Args: {args}. Mode: {behavior}."
+
     def _build_system_prompt(self) -> str:
         tools = self.tools.list_tools()
 
         if not tools:
             tool_context = "- aucun tool disponible"
         else:
-            tool_context = "\n".join(
-                f"- {tool.name}: {tool.description}" for tool in tools
-            )
+            tool_context = "\n".join(self._format_tool(tool) for tool in tools)
 
         return SYSTEM_PROMPT.replace("__TOOLS__", tool_context)
 
@@ -86,29 +103,66 @@ class AgentRuntime:
             ],
         ]
 
-    def _parse_action(self, raw: str) -> dict[str, Any]:
-        raw = raw.strip()
+    def _parse_json_value(self, raw: str) -> Any:
+        text = raw.strip()
+        decoder = json.JSONDecoder()
 
-        if raw.startswith("{") or raw.startswith('"'):
+        try:
+            value, _ = decoder.raw_decode(text)
+        except json.JSONDecodeError:
+            pass
+        else:
+            return value
+
+        if text.startswith("```"):
+            cleaned = text.strip("`").strip()
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
             try:
-                parsed = json.loads(raw)
+                value, _ = decoder.raw_decode(cleaned)
             except json.JSONDecodeError:
                 pass
             else:
-                if isinstance(parsed, dict):
-                    return parsed
-                if isinstance(parsed, str):
-                    return {
-                        "tool": "final",
-                        "args": {
-                            "content": parsed,
-                        },
-                    }
+                return value
+
+        for index, character in enumerate(text):
+            if character not in ('{', '"'):
+                continue
+
+            try:
+                value, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(value, dict | str):
+                return value
+
+        return raw
+
+    def _parse_action(self, raw: str) -> dict[str, Any]:
+        parsed = self._parse_json_value(raw)
+
+        if isinstance(parsed, dict):
+            tool_name = parsed.get("tool")
+            args = parsed.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+
+            if isinstance(tool_name, str):
+                return {
+                    "tool": tool_name,
+                    "args": args,
+                }
+
+        if isinstance(parsed, str):
+            content = parsed
+        else:
+            content = raw.strip()
 
         return {
             "tool": "final",
             "args": {
-                "content": raw,
+                "content": content,
             },
         }
 
@@ -122,28 +176,118 @@ class AgentRuntime:
 
         return str(args.get("content", ""))
 
-    def _is_tool_allowed(self, tool_name: str, user_input: str) -> bool:
-        if tool_name != "echo":
+    def _is_low_quality_final(self, response: str) -> bool:
+        normalized = response.strip().lower()
+        technical_tokens = {
+            "",
+            "final",
+            "tool",
+            "json",
+            "reponse finale",
+            "réponse finale",
+        }
+        return normalized in technical_tokens
+
+    def _is_tool_allowed(self, tool: Tool, user_input: str) -> bool:
+        if not tool.trigger_words:
             return True
 
         normalized = user_input.lower()
-        echo_markers = (
-            "echo",
-            "repete",
-            "répète",
-            "retourne exactement",
-            "redis exactement",
+        return any(marker in normalized for marker in tool.trigger_words)
+
+    def _available_tool_names(self) -> str:
+        names = [tool.name for tool in self.tools.list_tools()]
+        if not names:
+            return "aucun"
+        return ", ".join(names)
+
+    def _unknown_requested_tool(self, user_input: str) -> str | None:
+        match = re.search(r"\btool\s+([a-zA-Z_][a-zA-Z0-9_-]*)", user_input)
+        if not match:
+            return None
+
+        tool_name = match.group(1)
+        if self.tools.get(tool_name):
+            return None
+
+        return tool_name
+
+    def _fill_missing_tool_args(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        user_input: str,
+    ) -> dict[str, Any]:
+        if tool.name == "calculator" and not args.get("expression"):
+            return {
+                **args,
+                "expression": self._extract_calculation_expression(user_input),
+            }
+
+        if tool.name == "text_stats" and not args.get("text"):
+            return {
+                **args,
+                "text": self._extract_text_payload(user_input),
+            }
+
+        if tool.name != "echo" or args.get("text"):
+            return args
+
+        return {
+            **args,
+            "text": self._extract_text_payload(user_input),
+        }
+
+    def _extract_text_payload(self, user_input: str) -> str:
+        text = user_input
+        for separator in (":", "->"):
+            if separator in text:
+                text = text.split(separator, 1)[1]
+                break
+
+        cleaned = text.strip()
+        if cleaned.lower().startswith("echo"):
+            cleaned = cleaned[4:].strip()
+        if cleaned.lower().startswith("repete exactement"):
+            cleaned = cleaned[len("repete exactement") :].strip()
+        if cleaned.lower().startswith("répète exactement"):
+            cleaned = cleaned[len("répète exactement") :].strip()
+
+        return cleaned
+
+    def _extract_calculation_expression(self, user_input: str) -> str:
+        expression = user_input.lower()
+        prefixes = (
+            "calcule",
+            "calcul",
+            "combien font",
+            "combien fait",
         )
-        return any(marker in normalized for marker in echo_markers)
+        for prefix in prefixes:
+            if expression.startswith(prefix):
+                expression = expression[len(prefix) :]
+                break
+
+        expression = expression.replace("?", "").replace("=", "")
+        return expression.strip()
 
     async def _force_final_response(
         self,
         system_prompt: str,
         instruction: str,
     ) -> str:
+        correction_prompt = (
+            f"{system_prompt}\n\n"
+            "CORRECTION OBLIGATOIRE : reponds maintenant avec le format "
+            'JSON final uniquement: {"tool":"final","args":{"content":"..."}}.'
+        )
         messages = [
-            *self._build_messages(system_prompt),
-            {"role": "assistant", "content": instruction},
+            {"role": "system", "content": correction_prompt},
+            *[
+                {"role": message.role, "content": message.content}
+                for message in self.state.messages
+            ],
+            {"role": "user", "content": instruction},
         ]
 
         raw = await self.llm.chat(messages)
@@ -155,11 +299,44 @@ class AgentRuntime:
 
         return "Je peux te repondre directement, sans utiliser de tool."
 
+    async def _run_tool(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        user_input: str,
+        system_prompt: str,
+    ) -> str:
+        args = self._fill_missing_tool_args(tool, args, user_input)
+        result = await tool.execute(**args)
+
+        if tool.return_direct:
+            return str(result)
+
+        self.add_assistant_message(f"[tool:{tool.name}] {result}")
+        return await self._force_final_response(
+            system_prompt,
+            (
+                f'Observation du tool "{tool.name}": {result}. '
+                'Utilise cette observation pour repondre a l utilisateur.'
+            ),
+        )
+
     async def run(self, user_input: str) -> str:
         self.logger.info("Agent runtime started")
 
         self.add_user_message(user_input)
         system_prompt = self._build_system_prompt()
+        unknown_tool = self._unknown_requested_tool(user_input)
+
+        if unknown_tool:
+            response = (
+                f'Je n\'ai pas acces au tool "{unknown_tool}". '
+                f"Tools disponibles: {self._available_tool_names()}."
+            )
+            self.add_assistant_message(response)
+            self._trim_history()
+            self.logger.info("Agent runtime finished")
+            return response
 
         raw = await self.llm.chat(self._build_messages(system_prompt))
         action = self._parse_action(raw)
@@ -171,42 +348,38 @@ class AgentRuntime:
 
         if tool_name == "final":
             response = self._final_content(action)
-        else:
-            tool_name = str(tool_name)
-            tool = self.tools.get(tool_name)
-
-            if not tool:
-                self.add_assistant_message(
-                    f"[tool_error] Tool introuvable: {tool_name}. "
-                    'Reponds avec le tool "final".'
-                )
+            if self._is_low_quality_final(response):
                 response = await self._force_final_response(
                     system_prompt,
-                    'Le tool demande est introuvable. Reponds avec "final".',
+                    "La reponse precedente est un marqueur technique. "
+                    "Reponds vraiment a la demande de l utilisateur.",
                 )
-            elif not self._is_tool_allowed(tool_name, user_input):
+        else:
+            tool = self.tools.get(str(tool_name))
+
+            if not tool:
+                response = (
+                    f'Je n\'ai pas acces au tool "{tool_name}". '
+                    f"Tools disponibles: {self._available_tool_names()}."
+                )
+            elif not self._is_tool_allowed(tool, user_input):
                 response = await self._force_final_response(
                     system_prompt,
                     (
-                        f'Le tool "{tool_name}" n\'est pas utile pour cette '
-                        'demande. Reponds naturellement avec "final".'
+                        f'Le tool "{tool.name}" n est pas pertinent pour cette '
+                        "demande. Reponds naturellement a l utilisateur."
                     ),
                 )
             else:
-                result = await tool.execute(**args)
-
-                self.add_assistant_message(f"[tool:{tool_name}] {result}")
-
-                response = await self._force_final_response(
-                    system_prompt,
-                    (
-                        f'Observation du tool "{tool_name}": {result}. '
-                        'Reponds maintenant avec "final".'
-                    ),
+                response = await self._run_tool(
+                    tool=tool,
+                    args=args,
+                    user_input=user_input,
+                    system_prompt=system_prompt,
                 )
 
         if not response:
-            response = raw
+            response = raw.strip()
 
         self.add_assistant_message(response)
         self._trim_history()

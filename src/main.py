@@ -3,7 +3,7 @@ import asyncio
 from src.application.orchestrators.agent_runtime import AgentRuntime
 from src.config.container import Container
 from src.config.logging import setup_logging
-from src.infrastructure.tools.echo_tool import EchoTool
+from src.infrastructure.tools.default_tools import register_default_tools
 
 
 async def main() -> None:
@@ -12,7 +12,7 @@ async def main() -> None:
     container = Container()
 
     registry = container.tool_registry()
-    registry.register(EchoTool())
+    register_default_tools(registry)
 
     agent: AgentRuntime = container.agent_runtime()
 

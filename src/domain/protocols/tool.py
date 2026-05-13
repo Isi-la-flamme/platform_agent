@@ -4,6 +4,9 @@ from typing import Any, Protocol
 class Tool(Protocol):
     name: str
     description: str
+    args_schema: dict[str, str]
+    return_direct: bool
+    trigger_words: tuple[str, ...]
 
     async def execute(self, **kwargs: Any) -> Any:
         ...
