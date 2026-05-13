@@ -5,6 +5,8 @@ from src.infrastructure.logging.loguru_logger import LoguruLogger
 from src.infrastructure.llm.openai_provider import OpenAIProvider
 from src.infrastructure.llm.groq_provider import GroqProvider
 from src.application.orchestrators.agent_runtime import AgentRuntime
+from src.infrastructure.tools.tool_registry import ToolRegistry
+from src.infrastructure.tools.echo_tool import EchoTool
 
 
 class Container(containers.DeclarativeContainer):
@@ -47,4 +49,7 @@ class Container(containers.DeclarativeContainer):
     AgentRuntime,
     llm=llm_provider,
     logger=logger,
+    )
+    tool_registry = providers.Singleton(
+    ToolRegistry
 )
