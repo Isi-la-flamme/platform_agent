@@ -4,6 +4,7 @@ import pytest
 
 from src.infrastructure.tools.calculator_tool import CalculatorTool
 from src.infrastructure.tools.datetime_tool import DateTimeTool
+from src.infrastructure.tools.python_code_tool import PythonCodeTool
 from src.infrastructure.tools.text_stats_tool import TextStatsTool
 
 
@@ -41,3 +42,32 @@ async def test_text_stats_counts_text() -> None:
     result = await tool.execute(text="bonjour agent\nca va")
 
     assert result == "Caracteres: 19; Mots: 4; Lignes: 2"
+
+
+@pytest.mark.asyncio
+async def test_python_code_tool_executes_print() -> None:
+    tool = PythonCodeTool()
+
+    result = await tool.execute(code="print(2 + 3)")
+
+    assert "Code sortie: 0" in result
+    assert "stdout:\n5" in result
+
+
+@pytest.mark.asyncio
+async def test_python_code_tool_reports_runtime_errors() -> None:
+    tool = PythonCodeTool()
+
+    result = await tool.execute(code="raise ValueError('boom')")
+
+    assert "Code sortie: 1" in result
+    assert "ValueError: boom" in result
+
+
+@pytest.mark.asyncio
+async def test_python_code_tool_blocks_dangerous_imports() -> None:
+    tool = PythonCodeTool()
+
+    result = await tool.execute(code="import os\nprint(os.getcwd())")
+
+    assert result == "Import interdit: os"

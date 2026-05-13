@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 logs/
+data/
 
 .pytest_cache/
 .mypy_cache/

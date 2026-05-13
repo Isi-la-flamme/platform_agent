@@ -5,6 +5,7 @@ from src.config.settings import get_settings
 from src.infrastructure.llm.groq_provider import GroqProvider
 from src.infrastructure.llm.openai_provider import OpenAIProvider
 from src.infrastructure.logging.loguru_logger import LoguruLogger
+from src.infrastructure.memory.json_memory_store import JsonMemoryStore
 from src.infrastructure.tools.tool_registry import ToolRegistry
 
 
@@ -14,6 +15,11 @@ class Container(containers.DeclarativeContainer):
     logger = providers.Singleton(LoguruLogger)
 
     tool_registry = providers.Singleton(ToolRegistry)
+
+    memory_store = providers.Singleton(
+        JsonMemoryStore,
+        path=providers.Callable(lambda s: s.MEMORY_PATH, settings),
+    )
 
     llm_provider = providers.Selector(
         settings.provided.APP_ENV,
@@ -51,4 +57,5 @@ class Container(containers.DeclarativeContainer):
         llm=llm_provider,
         logger=logger,
         tools=tool_registry,
+        memory=memory_store,
     )

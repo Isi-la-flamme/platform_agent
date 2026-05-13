@@ -6,6 +6,7 @@ from src.domain.entities.agent import AgentState
 from src.domain.entities.message import Message
 from src.domain.protocols.llm_provider import LLMProvider
 from src.domain.protocols.logger import LoggerProtocol
+from src.domain.protocols.memory import LongTermMemory
 from src.domain.protocols.tool import Tool, ToolProvider
 
 SYSTEM_PROMPT = """
@@ -20,8 +21,12 @@ STYLE :
 - Reponds en francais naturel.
 - Sois clair, court et utile.
 - Ne dis pas que tu es "aux ordres".
+- Si une information personnelle est dans MEMOIRE LONG TERME, utilise-la.
 - Si tu ne sais pas une information personnelle, dis simplement que tu ne l'as
   pas encore.
+
+MEMOIRE LONG TERME :
+__MEMORY__
 
 TOOLS DISPONIBLES :
 __TOOLS__
@@ -58,10 +63,12 @@ class AgentRuntime:
         llm: LLMProvider,
         logger: LoggerProtocol,
         tools: ToolProvider,
+        memory: LongTermMemory | None = None,
     ) -> None:
         self.llm = llm
         self.logger = logger
         self.tools = tools
+        self.memory = memory
         self.state = AgentState()
 
     def add_user_message(self, content: str) -> None:
@@ -84,7 +91,7 @@ class AgentRuntime:
         behavior = "retour direct" if tool.return_direct else "observation"
         return f"- {tool.name}: {tool.description} Args: {args}. Mode: {behavior}."
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, user_input: str = "") -> str:
         tools = self.tools.list_tools()
 
         if not tools:
@@ -92,7 +99,25 @@ class AgentRuntime:
         else:
             tool_context = "\n".join(self._format_tool(tool) for tool in tools)
 
-        return SYSTEM_PROMPT.replace("__TOOLS__", tool_context)
+        memory_context = self._format_memory_context(user_input)
+
+        return (
+            SYSTEM_PROMPT.replace("__TOOLS__", tool_context)
+            .replace("__MEMORY__", memory_context)
+        )
+
+    def _format_memory_context(self, user_input: str) -> str:
+        if not self.memory:
+            return "- aucune memoire long terme disponible"
+
+        facts = self.memory.search(user_input)
+        if not facts:
+            facts = self.memory.all()[:5]
+
+        if not facts:
+            return "- aucun fait memorise"
+
+        return "\n".join(f"- {fact.text}" for fact in facts)
 
     def _build_messages(self, system_prompt: str) -> list[dict[str, str]]:
         return [
@@ -212,6 +237,53 @@ class AgentRuntime:
 
         return tool_name
 
+    def _learn_long_term_facts(self, user_input: str) -> None:
+        if not self.memory:
+            return
+
+        patterns = (
+            r"\bmon nom est\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
+            r"\bje m'appelle\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
+            r"\bje m appelle\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
+            r"\bappelle-moi\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, user_input, flags=re.IGNORECASE)
+            if not match:
+                continue
+
+            name = match.group(1).strip(" .,!?:;")
+            if not name:
+                continue
+
+            self.memory.remember(
+                key="user.name",
+                value=name,
+                text=f"Le nom de l'utilisateur est {name}.",
+            )
+            return
+
+    def _answer_from_memory(self, user_input: str) -> str | None:
+        if not self.memory:
+            return None
+
+        normalized = user_input.lower()
+        asks_name = (
+            "mon nom" in normalized
+            or "je m'appelle comment" in normalized
+            or "je m appelle comment" in normalized
+            or "qui je suis" in normalized
+            or "qui suis-je" in normalized
+        )
+        if not asks_name:
+            return None
+
+        name = self.memory.get("user.name")
+        if not name:
+            return "Je ne connais pas encore ton nom."
+
+        return f"Ton nom est {name.value}."
+
     def _fill_missing_tool_args(
         self,
         tool: Tool,
@@ -325,7 +397,15 @@ class AgentRuntime:
         self.logger.info("Agent runtime started")
 
         self.add_user_message(user_input)
-        system_prompt = self._build_system_prompt()
+        self._learn_long_term_facts(user_input)
+        memory_response = self._answer_from_memory(user_input)
+        if memory_response:
+            self.add_assistant_message(memory_response)
+            self._trim_history()
+            self.logger.info("Agent runtime finished")
+            return memory_response
+
+        system_prompt = self._build_system_prompt(user_input)
         unknown_tool = self._unknown_requested_tool(user_input)
 
         if unknown_tool:
