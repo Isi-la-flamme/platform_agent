@@ -1,9 +1,17 @@
-from typing import Protocol, Any
+from typing import Any, Protocol
 
 
 class Tool(Protocol):
     name: str
     description: str
 
-    async def execute(self, **kwargs) -> Any:
+    async def execute(self, **kwargs: Any) -> Any:
+        ...
+
+
+class ToolProvider(Protocol):
+    def get(self, name: str) -> Tool | None:
+        ...
+
+    def list_tools(self) -> list[Tool]:
         ...

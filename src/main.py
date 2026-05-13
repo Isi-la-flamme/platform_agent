@@ -1,11 +1,12 @@
 import asyncio
 
-from src.config.container import Container
-from src.infrastructure.tools.echo_tool import EchoTool
 from src.application.orchestrators.agent_runtime import AgentRuntime
+from src.config.container import Container
 from src.config.logging import setup_logging
+from src.infrastructure.tools.echo_tool import EchoTool
 
-async def main():
+
+async def main() -> None:
     setup_logging()
 
     container = Container()
@@ -13,11 +14,7 @@ async def main():
     registry = container.tool_registry()
     registry.register(EchoTool())
 
-    agent = AgentRuntime(
-        llm=container.llm_provider(),
-        logger=container.logger(),
-        tools=registry,
-    )
+    agent: AgentRuntime = container.agent_runtime()
 
     print("Agent ready.")
     print("Type 'exit' to quit.\n")
@@ -33,8 +30,8 @@ async def main():
 
             print(f"\nAgent > {response}\n")
 
-        except Exception as e:
-            print(f"\nError > {e}\n")
+        except Exception as exc:
+            print(f"\nError > {exc}\n")
 
 
 if __name__ == "__main__":

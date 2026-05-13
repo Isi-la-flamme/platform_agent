@@ -2,7 +2,7 @@ from src.domain.protocols.tool import Tool
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -11,5 +11,5 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def list_tools(self) -> list[str]:
-        return list(self._tools.keys())
+    def list_tools(self) -> list[Tool]:
+        return list(self._tools.values())

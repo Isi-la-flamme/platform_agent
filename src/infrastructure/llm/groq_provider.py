@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from groq import AsyncGroq
 
 from src.domain.protocols.llm_provider import LLMProvider
@@ -5,7 +7,7 @@ from src.domain.protocols.logger import LoggerProtocol
 
 
 class GroqProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str, logger: LoggerProtocol):
+    def __init__(self, api_key: str, model: str, logger: LoggerProtocol) -> None:
         self.client = AsyncGroq(api_key=api_key)
         self.model = model
         self.logger = logger
@@ -25,16 +27,16 @@ class GroqProvider(LLMProvider):
 
         response = await self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=cast(Any, messages),
         )
 
         return response.choices[0].message.content or ""
 
-    async def stream(self, messages: list[dict[str, str]]):
+    async def stream(self, messages: list[dict[str, str]]) -> Any:
         self.logger.debug("Groq stream called")
 
         return await self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=cast(Any, messages),
             stream=True,
         )

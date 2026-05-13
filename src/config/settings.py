@@ -1,9 +1,7 @@
 from functools import lru_cache
 
-from pydantic import Field
-from pydantic import SecretStr
-from pydantic_settings import BaseSettings
-from pydantic_settings import SettingsConfigDict
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config.environments import Environment
 

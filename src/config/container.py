@@ -1,19 +1,19 @@
 from dependency_injector import containers, providers
 
-from src.config.settings import get_settings
-from src.infrastructure.logging.loguru_logger import LoguruLogger
-from src.infrastructure.llm.openai_provider import OpenAIProvider
-from src.infrastructure.llm.groq_provider import GroqProvider
 from src.application.orchestrators.agent_runtime import AgentRuntime
+from src.config.settings import get_settings
+from src.infrastructure.llm.groq_provider import GroqProvider
+from src.infrastructure.llm.openai_provider import OpenAIProvider
+from src.infrastructure.logging.loguru_logger import LoguruLogger
 from src.infrastructure.tools.tool_registry import ToolRegistry
-from src.infrastructure.tools.echo_tool import EchoTool
 
 
 class Container(containers.DeclarativeContainer):
-
     settings = providers.Singleton(get_settings)
 
     logger = providers.Singleton(LoguruLogger)
+
+    tool_registry = providers.Singleton(ToolRegistry)
 
     llm_provider = providers.Selector(
         settings.provided.APP_ENV,
@@ -45,11 +45,10 @@ class Container(containers.DeclarativeContainer):
             logger=logger,
         ),
     )
+
     agent_runtime = providers.Factory(
-    AgentRuntime,
-    llm=llm_provider,
-    logger=logger,
+        AgentRuntime,
+        llm=llm_provider,
+        logger=logger,
+        tools=tool_registry,
     )
-    tool_registry = providers.Singleton(
-    ToolRegistry
-)

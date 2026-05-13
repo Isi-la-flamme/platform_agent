@@ -1,9 +1,12 @@
-from src.domain.protocols.tool import Tool
+from typing import Any
 
 
 class EchoTool:
     name = "echo"
-    description = "Retourne exactement ce que l'utilisateur envoie"
+    description = (
+        "Retourne exactement le texte fourni. A utiliser seulement si "
+        "l'utilisateur demande explicitement de repeter ou d'echo."
+    )
 
-    async def execute(self, **kwargs):
-        return kwargs.get("text", "")
+    async def execute(self, **kwargs: Any) -> str:
+        return str(kwargs.get("text", ""))
