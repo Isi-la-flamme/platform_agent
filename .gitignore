@@ -13,3 +13,6 @@ data/
 coverage.xml
 .coverage
 htmlcov/
+urgences.txt
+logs/app.log
+agent-platform.zip

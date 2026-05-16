@@ -2,6 +2,11 @@ import io
 import sys
 import contextlib
 from typing import Any
+try:
+    import resource  # Uniquement sur Unix
+except ImportError:
+    resource = None
+import multiprocessing
 
 
 class PythonCodeTool:
@@ -16,6 +21,12 @@ class PythonCodeTool:
     }
     return_direct = True
     trigger_words: tuple[str, ...] = ("python", "execute", "code")
+    
+    # Limites de ressources
+    MAX_MEMORY_MB = 128
+    
+    # Whitelist de mots interdits (protection supplémentaire contre l'évasion)
+    FORBIDDEN_KEYWORDS = {"__subclasses__", "__mro__", "getattr", "setattr", "eval", "exec", "pickle"}
 
     def infer_args(self, user_input: str, args: dict[str, Any]) -> dict[str, Any]:
         """Tente d'extraire le bloc de code Python si le LLM l'oublie dans les args."""
@@ -32,6 +43,18 @@ class PythonCodeTool:
         code = str(kwargs.get("code", "")).strip()
         if not code:
             return "Erreur: Aucun code fourni."
+            
+        # 1. Whitelist / Blacklist statique du code
+        for forbidden in self.FORBIDDEN_KEYWORDS:
+            if forbidden in code:
+                return f"Erreur de sécurité : Mot-clé interdit '{forbidden}' détecté."
+
+        # 2. Limitation des ressources (RAM)
+        if resource:
+            # On limite la mémoire vive allouée (Soft & Hard limits)
+            limit_bytes = self.MAX_MEMORY_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+            resource.setrlimit(resource.RLIMIT_CPU, (5, 5)) # Max 5 sec CPU
 
         # Environnement restreint (Sandbox)
         # On limite les builtins pour empecher __import__, open, eval, etc.
