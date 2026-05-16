@@ -20,6 +20,26 @@ class TextStatsTool:
         "longueur",
     )
 
+    def infer_args(self, user_input: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Extrait le texte à analyser depuis l'entrée utilisateur si absent des arguments."""
+        if args.get("text"):
+            return args
+
+        text = user_input
+        for separator in (":", "->"):
+            if separator in text:
+                text = text.split(separator, 1)[1]
+                break
+
+        cleaned = text.strip()
+        prefixes = ("compte", "statistiques", "longueur")
+        for prefix in prefixes:
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+
+        return {**args, "text": cleaned}
+
     async def execute(self, **kwargs: Any) -> str:
         text = str(kwargs.get("text", ""))
         words = text.split()

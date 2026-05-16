@@ -40,6 +40,26 @@ class CalculatorTool:
         ast.USub: operator.neg,
     }
 
+    def infer_args(self, user_input: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Tente d'extraire l'expression mathématique depuis l'entrée utilisateur."""
+        if args.get("expression"):
+            return args
+
+        expression = user_input.lower()
+        prefixes = (
+            "calcule",
+            "calcul",
+            "combien font",
+            "combien fait",
+        )
+        for prefix in prefixes:
+            if expression.startswith(prefix):
+                expression = expression[len(prefix) :]
+                break
+
+        expression = expression.replace("?", "").replace("=", "")
+        return {**args, "expression": expression.strip()}
+
     async def execute(self, **kwargs: Any) -> str:
         expression = str(kwargs.get("expression", "")).strip()
         if not expression:

@@ -290,58 +290,15 @@ class AgentRuntime:
         args: dict[str, Any],
         user_input: str,
     ) -> dict[str, Any]:
-        if tool.name == "calculator" and not args.get("expression"):
-            return {
-                **args,
-                "expression": self._extract_calculation_expression(user_input),
-            }
-
-        if tool.name == "text_stats" and not args.get("text"):
-            return {
-                **args,
-                "text": self._extract_text_payload(user_input),
-            }
-
-        if tool.name != "echo" or args.get("text"):
-            return args
-
-        return {
-            **args,
-            "text": self._extract_text_payload(user_input),
-        }
-
-    def _extract_text_payload(self, user_input: str) -> str:
-        text = user_input
-        for separator in (":", "->"):
-            if separator in text:
-                text = text.split(separator, 1)[1]
-                break
-
-        cleaned = text.strip()
-        if cleaned.lower().startswith("echo"):
-            cleaned = cleaned[4:].strip()
-        if cleaned.lower().startswith("repete exactement"):
-            cleaned = cleaned[len("repete exactement") :].strip()
-        if cleaned.lower().startswith("répète exactement"):
-            cleaned = cleaned[len("répète exactement") :].strip()
-
-        return cleaned
-
-    def _extract_calculation_expression(self, user_input: str) -> str:
-        expression = user_input.lower()
-        prefixes = (
-            "calcule",
-            "calcul",
-            "combien font",
-            "combien fait",
-        )
-        for prefix in prefixes:
-            if expression.startswith(prefix):
-                expression = expression[len(prefix) :]
-                break
-
-        expression = expression.replace("?", "").replace("=", "")
-        return expression.strip()
+        """
+        Tente de compléter les arguments manquants d'un outil.
+        Délègue maintenant la logique spécifique à l'outil si celui-ci 
+        implémente une méthode d'auto-complétion.
+        """
+        if hasattr(tool, "infer_args") and callable(getattr(tool, "infer_args")):
+            return tool.infer_args(user_input, args)
+            
+        return args
 
     async def _force_final_response(
         self,
