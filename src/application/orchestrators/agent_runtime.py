@@ -9,6 +9,7 @@ from src.domain.protocols.llm_provider import LLMProvider
 from src.domain.protocols.logger import LoggerProtocol
 from src.domain.protocols.memory import LongTermMemory
 from src.domain.protocols.tool import Tool, ToolProvider
+from src.domain.protocols.event_bus import EventBus
 from src.application.orchestrators.tool_executor import ToolExecutor, ToolExecutionError
 
 SYSTEM_PROMPT = """
@@ -67,13 +68,15 @@ class AgentRuntime:
         tools: ToolProvider,
         memory: LongTermMemory | None = None,
         executor: ToolExecutor | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self.llm = llm
         self.logger = logger
         self.tools = tools
         self.memory = memory
+        self.event_bus = event_bus
         self.state = AgentState()
-        self.executor = executor or ToolExecutor(tools, logger)
+        self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
 
     def add_user_message(self, content: str) -> None:
         self.state.messages.append(Message(role="user", content=content))
@@ -322,10 +325,84 @@ class AgentRuntime:
 
     async def run(self, user_input: str) -> str:
         self.logger.info("Agent runtime started")
+        if self.event_bus:
+            await self.event_bus.emit("agent.started", {"user_input": user_input})
 
-        self.add_user_message(user_input)
-        self._learn_long_term_facts(user_input)
-        memory_response = self._answer_from_memory(user_input)
+        try:
+            self.add_user_message(user_input)
+            self._learn_long_term_facts(user_input)
+            memory_response = self._answer_from_memory(user_input)
+            if memory_response:
+                self.add_assistant_message(memory_response)
+                self._trim_history()
+                self.logger.info("Agent runtime finished")
+                return memory_response
+
+            system_prompt = self._build_system_prompt(user_input)
+            unknown_tool = self._unknown_requested_tool(user_input)
+
+            if unknown_tool:
+                response = (
+                    f'Je n\'ai pas acces au tool "{unknown_tool}". '
+                    f"Tools disponibles: {self._available_tool_names()}."
+                )
+                self.add_assistant_message(response)
+                self._trim_history()
+                self.logger.info("Agent runtime finished")
+                return response
+
+            raw = await self.llm.chat(self._build_messages(system_prompt))
+            action = self._parse_action(raw)
+
+            tool_name = action.tool
+            args = action.args
+
+            if tool_name == "final":
+                response = self._final_content(action)
+                if self._is_low_quality_final(response):
+                    response = await self._force_final_response(
+                        system_prompt,
+                        "La reponse precedente est un marqueur technique. "
+                        "Reponds vraiment a la demande de l utilisateur.",
+                    )
+            else:
+                tool = self.tools.get(str(tool_name))
+
+                if not tool:
+                    response = (
+                        f'Je n\'ai pas acces au tool "{tool_name}". '
+                        f"Tools disponibles: {self._available_tool_names()}."
+                    )
+                elif not self._is_tool_allowed(tool, user_input):
+                    response = await self._force_final_response(
+                        system_prompt,
+                        (
+                            f'Le tool "{tool.name}" n est pas pertinent pour cette '
+                            "demande. Reponds naturellement a l utilisateur."
+                        ),
+                    )
+                else:
+                    response = await self._run_tool(
+                        tool=tool,
+                        args=args,
+                        user_input=user_input,
+                        system_prompt=system_prompt,
+                    )
+
+            if not response:
+                response = raw.strip()
+
+            self.add_assistant_message(response)
+            self._trim_history()
+
+            self.logger.info("Agent runtime finished")
+
+            return response
+        except Exception as e:
+            self.logger.error(f"Agent runtime failed: {e}")
+            if self.event_bus:
+                await self.event_bus.emit("agent.failed", {"error": str(e)})
+            raise
         if memory_response:
             self.add_assistant_message(memory_response)
             self._trim_history()

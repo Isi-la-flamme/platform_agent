@@ -4,6 +4,7 @@ import time
 from typing import Any
 from src.domain.protocols.tool import Tool, ToolProvider
 from src.domain.protocols.logger import LoggerProtocol
+from src.domain.protocols.event_bus import EventBus
 
 class ToolExecutionError(Exception):
     pass
@@ -14,12 +15,14 @@ class ToolExecutor:
         tools: ToolProvider, 
         logger: LoggerProtocol,
         default_timeout: float = 5.0,
-        allowed_tools: set[str] | None = None
+        allowed_tools: set[str] | None = None,
+        event_bus: EventBus | None = None
     ) -> None:
         self.tools = tools
         self.logger = logger
         self.default_timeout = default_timeout
         self.allowed_tools = allowed_tools
+        self.event_bus = event_bus
 
     async def execute(self, tool_name: str, args: dict[str, Any], user_input: str) -> str:
         # 1. Vérification des Permissions
@@ -34,6 +37,9 @@ class ToolExecutor:
         # 2. Audit Log (Audit Trailing)
         self.logger.info(f"[AUDIT] START | tool={tool_name} | args={args}")
         start_time = time.perf_counter()
+
+        if self.event_bus:
+            await self.event_bus.emit("agent.tool_called", {"tool": tool_name, "args": args})
 
         try:
             if hasattr(tool, "infer_args"):
@@ -62,12 +68,29 @@ class ToolExecutor:
             
             duration = time.perf_counter() - start_time
             self.logger.info(f"[AUDIT] SUCCESS | tool={tool_name} | duration={duration:.3f}s")
+
+            if self.event_bus:
+                await self.event_bus.emit("agent.tool_completed", {
+                    "tool": tool_name, 
+                    "result": str(result), 
+                    "duration": duration
+                })
             
             return str(result)
 
         except asyncio.TimeoutError:
             self.logger.error(f"Timeout sur l'outil {tool_name}")
+            if self.event_bus:
+                await self.event_bus.emit("agent.failed", {
+                    "tool": tool_name, 
+                    "error": "timeout"
+                })
             return f"Erreur : L'outil {tool_name} a dépassé le temps limite de {self.default_timeout}s."
         except Exception as e:
             self.logger.error(f"Erreur tool {tool_name}: {str(e)}")
+            if self.event_bus:
+                await self.event_bus.emit("agent.failed", {
+                    "tool": tool_name, 
+                    "error": str(e)
+                })
             raise ToolExecutionError(f"Erreur d'exécution : {str(e)}")
