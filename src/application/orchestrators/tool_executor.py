@@ -27,7 +27,13 @@ class ToolExecutor:
         self.allowed_tools = allowed_tools
         self.event_bus = event_bus
 
-    async def execute(self, tool_name: str, args: dict[str, Any], user_input: str) -> str:
+    async def execute(
+        self, 
+        tool_name: str, 
+        args: dict[str, Any], 
+        user_input: str,
+        trace_id: str | None = None
+    ) -> str:
         # 1. Vérification des Permissions
         if self.allowed_tools is not None and tool_name not in self.allowed_tools:
             self.logger.warning(f"Tentative d'accès refusée : tool={tool_name}")
@@ -42,7 +48,11 @@ class ToolExecutor:
         start_time = time.perf_counter()
 
         if self.event_bus:
-            await self.event_bus.emit("agent.tool_called", {"tool": tool_name, "args": args})
+            await self.event_bus.emit("agent.tool_called", {
+                "trace_id": trace_id,
+                "tool": tool_name, 
+                "args": args
+            })
 
         try:
             if hasattr(tool, "infer_args"):
@@ -73,6 +83,7 @@ class ToolExecutor:
 
             if self.event_bus:
                 await self.event_bus.emit("agent.tool_completed", {
+                    "trace_id": trace_id,
                     "tool": tool_name, 
                     "result": str(result), 
                     "duration": duration
@@ -84,6 +95,7 @@ class ToolExecutor:
             self.logger.error(f"Timeout sur l'outil {tool_name}")
             if self.event_bus:
                 await self.event_bus.emit("agent.failed", {
+                    "trace_id": trace_id,
                     "tool": tool_name, 
                     "error": "timeout"
                 })
@@ -92,6 +104,7 @@ class ToolExecutor:
             self.logger.error(f"Erreur tool {tool_name}: {str(e)}")
             if self.event_bus:
                 await self.event_bus.emit("agent.failed", {
+                    "trace_id": trace_id,
                     "tool": tool_name, 
                     "error": str(e)
                 })

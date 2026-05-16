@@ -1,5 +1,7 @@
 import json
 import re
+import time
+import uuid
 from typing import Any
 
 from src.domain.entities.agent import AgentState
@@ -306,10 +308,13 @@ class AgentRuntime:
         args: dict[str, Any],
         user_input: str,
         system_prompt: str,
+        trace_id: str,
     ) -> str:
         try:
             # Délégation de l'exécution, des timeouts et de l'audit à l'exécuteur
-            result = await self.executor.execute(tool.name, args, user_input)
+            result = await self.executor.execute(
+                tool.name, args, user_input, trace_id=trace_id
+            )
             
             if tool.return_direct:
                 return result
@@ -321,12 +326,15 @@ class AgentRuntime:
             )
         except ToolExecutionError as e:
             # Refus motivé renvoyé à l'utilisateur/LLM
+            if self.event_bus:
+                await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": str(e)})
             return str(e)
 
     async def run(self, user_input: str) -> str:
+        trace_id = str(uuid.uuid4())
         self.logger.info("Agent runtime started")
         if self.event_bus:
-            await self.event_bus.emit("agent.started", {"user_input": user_input})
+            await self.event_bus.emit("agent.started", {"trace_id": trace_id, "user_input": user_input})
 
         try:
             self.add_user_message(user_input)
@@ -387,6 +395,7 @@ class AgentRuntime:
                         args=args,
                         user_input=user_input,
                         system_prompt=system_prompt,
+                        trace_id=trace_id,
                     )
 
             if not response:
@@ -401,7 +410,7 @@ class AgentRuntime:
         except Exception as e:
             self.logger.error(f"Agent runtime failed: {e}")
             if self.event_bus:
-                await self.event_bus.emit("agent.failed", {"error": str(e)})
+                await self.event_bus.emit("agent.failed", {"trace_id": trace_id, "error": str(e)})
             raise
         if memory_response:
             self.add_assistant_message(memory_response)
