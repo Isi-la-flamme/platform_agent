@@ -39,6 +39,15 @@ class ToolExecutor:
             if hasattr(tool, "infer_args"):
                 args = tool.infer_args(user_input, args)
 
+            # Validation stricte des arguments par rapport au schéma de l'outil
+            for arg_name in args.keys():
+                if arg_name not in tool.args_schema:
+                    raise ToolExecutionError(f"Argument '{arg_name}' invalide pour l'outil '{tool_name}'.")
+            
+            for req_arg in tool.args_schema.keys():
+                if req_arg not in args:
+                    raise ToolExecutionError(f"Argument manquant '{req_arg}' pour l'outil '{tool_name}'.")
+
             # 3. Exécution avec Timeout strict et isolation de thread
             # On utilise run_in_executor pour ne pas bloquer l'event loop si le tool est CPU-bound
             loop = asyncio.get_running_loop()

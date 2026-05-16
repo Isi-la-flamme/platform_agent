@@ -4,10 +4,12 @@ from typing import Any
 
 from src.domain.entities.agent import AgentState
 from src.domain.entities.message import Message
+from src.domain.entities.tool_call import ToolCall
 from src.domain.protocols.llm_provider import LLMProvider
 from src.domain.protocols.logger import LoggerProtocol
 from src.domain.protocols.memory import LongTermMemory
 from src.domain.protocols.tool import Tool, ToolProvider
+from src.application.orchestrators.tool_executor import ToolExecutor, ToolExecutionError
 
 SYSTEM_PROMPT = """
 Tu es un agent logiciel.
@@ -64,12 +66,14 @@ class AgentRuntime:
         logger: LoggerProtocol,
         tools: ToolProvider,
         memory: LongTermMemory | None = None,
+        executor: ToolExecutor | None = None,
     ) -> None:
         self.llm = llm
         self.logger = logger
         self.tools = tools
         self.memory = memory
         self.state = AgentState()
+        self.executor = executor or ToolExecutor(tools, logger)
 
     def add_user_message(self, content: str) -> None:
         self.state.messages.append(Message(role="user", content=content))
@@ -164,42 +168,23 @@ class AgentRuntime:
 
         return raw
 
-    def _parse_action(self, raw: str) -> dict[str, Any]:
+    def _parse_action(self, raw: str) -> ToolCall:
         parsed = self._parse_json_value(raw)
 
-        if isinstance(parsed, dict):
-            tool_name = parsed.get("tool")
-            args = parsed.get("args", {})
-            if not isinstance(args, dict):
-                args = {}
+        try:
+            if isinstance(parsed, dict):
+                return ToolCall.model_validate(parsed)
+        except Exception as e:
+            self.logger.warning(f"Validation Pydantic échouée: {e}")
 
-            if isinstance(tool_name, str):
-                return {
-                    "tool": tool_name,
-                    "args": args,
-                }
+        # Refus du JSON malformé ou invalide : on bascule sur une réponse textuelle sécurisée
+        content = str(parsed) if parsed is not None else raw.strip()
+        return ToolCall(tool="final", args={"content": content})
 
-        if isinstance(parsed, str):
-            content = parsed
-        else:
-            content = raw.strip()
-
-        return {
-            "tool": "final",
-            "args": {
-                "content": content,
-            },
-        }
-
-    def _final_content(self, action: dict[str, Any]) -> str:
-        if action.get("tool") != "final":
+    def _final_content(self, action: ToolCall) -> str:
+        if action.tool != "final":
             return ""
-
-        args = action.get("args", {})
-        if not isinstance(args, dict):
-            return ""
-
-        return str(args.get("content", ""))
+        return str(action.args.get("content", ""))
 
     def _is_low_quality_final(self, response: str) -> bool:
         normalized = response.strip().lower()
@@ -284,22 +269,6 @@ class AgentRuntime:
 
         return f"Ton nom est {name.value}."
 
-    def _fill_missing_tool_args(
-        self,
-        tool: Tool,
-        args: dict[str, Any],
-        user_input: str,
-    ) -> dict[str, Any]:
-        """
-        Tente de compléter les arguments manquants d'un outil.
-        Délègue maintenant la logique spécifique à l'outil si celui-ci 
-        implémente une méthode d'auto-complétion.
-        """
-        if hasattr(tool, "infer_args") and callable(getattr(tool, "infer_args")):
-            return tool.infer_args(user_input, args)
-            
-        return args
-
     async def _force_final_response(
         self,
         system_prompt: str,
@@ -335,20 +304,21 @@ class AgentRuntime:
         user_input: str,
         system_prompt: str,
     ) -> str:
-        args = self._fill_missing_tool_args(tool, args, user_input)
-        result = await tool.execute(**args)
+        try:
+            # Délégation de l'exécution, des timeouts et de l'audit à l'exécuteur
+            result = await self.executor.execute(tool.name, args, user_input)
+            
+            if tool.return_direct:
+                return result
 
-        if tool.return_direct:
-            return str(result)
-
-        self.add_assistant_message(f"[tool:{tool.name}] {result}")
-        return await self._force_final_response(
-            system_prompt,
-            (
-                f'Observation du tool "{tool.name}": {result}. '
-                'Utilise cette observation pour repondre a l utilisateur.'
-            ),
-        )
+            self.add_assistant_message(f"[tool:{tool.name}] {result}")
+            return await self._force_final_response(
+                system_prompt,
+                f'Observation du tool "{tool.name}": {result}. Utilise cette observation pour repondre.'
+            )
+        except ToolExecutionError as e:
+            # Refus motivé renvoyé à l'utilisateur/LLM
+            return str(e)
 
     async def run(self, user_input: str) -> str:
         self.logger.info("Agent runtime started")
@@ -378,10 +348,8 @@ class AgentRuntime:
         raw = await self.llm.chat(self._build_messages(system_prompt))
         action = self._parse_action(raw)
 
-        tool_name = action.get("tool")
-        args = action.get("args", {})
-        if not isinstance(args, dict):
-            args = {}
+        tool_name = action.tool
+        args = action.args
 
         if tool_name == "final":
             response = self._final_content(action)
