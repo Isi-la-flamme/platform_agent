@@ -1,9 +1,7 @@
-from dataclasses import dataclass
+from pydantic import BaseModel
 
-
-@dataclass(frozen=True)
-class MemoryFact:
+class MemoryFact(BaseModel):
+    """Entité représentant un fait stocké en mémoire long terme."""
     key: str
     value: str
     text: str
-    updated_at: str
