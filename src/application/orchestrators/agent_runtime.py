@@ -13,51 +13,10 @@ from src.domain.protocols.memory import LongTermMemory
 from src.domain.protocols.tool import Tool, ToolProvider
 from src.domain.protocols.event_bus import EventBus
 from src.application.orchestrators.tool_executor import ToolExecutor, ToolExecutionError
-
-SYSTEM_PROMPT = """
-Tu es un agent logiciel.
-
-Tu peux :
-- appeler un tool disponible
-- repondre directement
-- discuter normalement avec l'utilisateur
-
-STYLE :
-- Reponds en francais naturel.
-- Sois clair, court et utile.
-- Ne dis pas que tu es "aux ordres".
-- Si une information personnelle est dans MEMOIRE LONG TERME, utilise-la.
-- Si tu ne sais pas une information personnelle, dis simplement que tu ne l'as
-  pas encore.
-
-MEMOIRE LONG TERME :
-__MEMORY__
-
-TOOLS DISPONIBLES :
-__TOOLS__
-
-REGLES ABSOLUES :
-- Tu dois repondre uniquement en JSON valide.
-- Tu ne dois jamais ajouter de markdown, texte, explication ou bloc code hors JSON.
-- Tu dois appeler uniquement un tool liste dans TOOLS DISPONIBLES.
-- Si aucun tool disponible ne correspond, utilise le tool "final".
-- Pour une salutation ou une conversation simple, utilise toujours "final".
-- N'utilise un tool que si cela aide vraiment a repondre a la demande.
-
-FORMAT 1 (appel tool) :
-{
-  "tool": "nom_du_tool",
-  "args": { ... }
-}
-
-FORMAT 2 (reponse finale) :
-{
-  "tool": "final",
-  "args": {
-    "content": "reponse finale"
-  }
-}
-"""
+from src.application.orchestrators.response_parser import ResponseParser
+from src.application.orchestrators.prompt_manager import PromptManager
+from src.application.orchestrators.conversation_manager import ConversationManager
+from src.application.orchestrators.memory_manager import MemoryManager
 
 
 class AgentRuntime:
@@ -71,137 +30,26 @@ class AgentRuntime:
         memory: LongTermMemory | None = None,
         executor: ToolExecutor | None = None,
         event_bus: EventBus | None = None,
+        parser: ResponseParser | None = None,
+        prompter: PromptManager | None = None,
     ) -> None:
         self.llm = llm
         self.logger = logger
         self.tools = tools
-        self.memory = memory
         self.event_bus = event_bus
-        self.state = AgentState()
+        
+        # Initialisation des composants modulaires
+        self.conversation = ConversationManager(self.MAX_MESSAGES)
+        self.memory_manager = MemoryManager(memory)
+        self.parser = parser or ResponseParser(logger)
+        self.prompter = prompter or PromptManager()
         self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
-
-    def add_user_message(self, content: str) -> None:
-        self.state.messages.append(Message(role="user", content=content))
-
-    def add_assistant_message(self, content: str) -> None:
-        self.state.messages.append(Message(role="assistant", content=content))
-
-    def _trim_history(self) -> None:
-        self.state.messages = self.state.messages[-self.MAX_MESSAGES :]
-
-    def _format_tool(self, tool: Tool) -> str:
-        args = ", ".join(
-            f"{name}: {description}"
-            for name, description in tool.args_schema.items()
-        )
-        if not args:
-            args = "aucun argument"
-
-        behavior = "retour direct" if tool.return_direct else "observation"
-        return f"- {tool.name}: {tool.description} Args: {args}. Mode: {behavior}."
-
-    def _build_system_prompt(self, user_input: str = "") -> str:
-        tools = self.tools.list_tools()
-
-        if not tools:
-            tool_context = "- aucun tool disponible"
-        else:
-            tool_context = "\n".join(self._format_tool(tool) for tool in tools)
-
-        memory_context = self._format_memory_context(user_input)
-
-        return (
-            SYSTEM_PROMPT.replace("__TOOLS__", tool_context)
-            .replace("__MEMORY__", memory_context)
-        )
-
-    def _format_memory_context(self, user_input: str) -> str:
-        if not self.memory:
-            return "- aucune memoire long terme disponible"
-
-        facts = self.memory.search(user_input)
-        if not facts:
-            facts = self.memory.all()[:5]
-
-        if not facts:
-            return "- aucun fait memorise"
-
-        return "\n".join(f"- {fact.text}" for fact in facts)
 
     def _build_messages(self, system_prompt: str) -> list[dict[str, str]]:
         return [
             {"role": "system", "content": system_prompt},
-            *[
-                {"role": message.role, "content": message.content}
-                for message in self.state.messages
-            ],
+            *self.conversation.get_messages_as_dicts()
         ]
-
-    def _parse_json_value(self, raw: str) -> Any:
-        text = raw.strip()
-        decoder = json.JSONDecoder()
-
-        try:
-            value, _ = decoder.raw_decode(text)
-        except json.JSONDecodeError:
-            pass
-        else:
-            return value
-
-        if text.startswith("```"):
-            cleaned = text.strip("`").strip()
-            if cleaned.startswith("json"):
-                cleaned = cleaned[4:].strip()
-            try:
-                value, _ = decoder.raw_decode(cleaned)
-            except json.JSONDecodeError:
-                pass
-            else:
-                return value
-
-        for index, character in enumerate(text):
-            if character not in ('{', '"'):
-                continue
-
-            try:
-                value, _ = decoder.raw_decode(text[index:])
-            except json.JSONDecodeError:
-                continue
-
-            if isinstance(value, dict | str):
-                return value
-
-        return raw
-
-    def _parse_action(self, raw: str) -> ToolCall:
-        parsed = self._parse_json_value(raw)
-
-        try:
-            if isinstance(parsed, dict):
-                return ToolCall.model_validate(parsed)
-        except Exception as e:
-            self.logger.warning(f"Validation Pydantic échouée: {e}")
-
-        # Refus du JSON malformé ou invalide : on bascule sur une réponse textuelle sécurisée
-        content = str(parsed) if parsed is not None else raw.strip()
-        return ToolCall(tool="final", args={"content": content})
-
-    def _final_content(self, action: ToolCall) -> str:
-        if action.tool != "final":
-            return ""
-        return str(action.args.get("content", ""))
-
-    def _is_low_quality_final(self, response: str) -> bool:
-        normalized = response.strip().lower()
-        technical_tokens = {
-            "",
-            "final",
-            "tool",
-            "json",
-            "reponse finale",
-            "réponse finale",
-        }
-        return normalized in technical_tokens
 
     def _is_tool_allowed(self, tool: Tool, user_input: str) -> bool:
         if not tool.trigger_words:
@@ -209,70 +57,6 @@ class AgentRuntime:
 
         normalized = user_input.lower()
         return any(marker in normalized for marker in tool.trigger_words)
-
-    def _available_tool_names(self) -> str:
-        names = [tool.name for tool in self.tools.list_tools()]
-        if not names:
-            return "aucun"
-        return ", ".join(names)
-
-    def _unknown_requested_tool(self, user_input: str) -> str | None:
-        match = re.search(r"\btool\s+([a-zA-Z_][a-zA-Z0-9_-]*)", user_input)
-        if not match:
-            return None
-
-        tool_name = match.group(1)
-        if self.tools.get(tool_name):
-            return None
-
-        return tool_name
-
-    def _learn_long_term_facts(self, user_input: str) -> None:
-        if not self.memory:
-            return
-
-        patterns = (
-            r"\bmon nom est\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
-            r"\bje m'appelle\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
-            r"\bje m appelle\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
-            r"\bappelle-moi\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ '’-]{1,60})",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, user_input, flags=re.IGNORECASE)
-            if not match:
-                continue
-
-            name = match.group(1).strip(" .,!?:;")
-            if not name:
-                continue
-
-            self.memory.remember(
-                key="user.name",
-                value=name,
-                text=f"Le nom de l'utilisateur est {name}.",
-            )
-            return
-
-    def _answer_from_memory(self, user_input: str) -> str | None:
-        if not self.memory:
-            return None
-
-        normalized = user_input.lower()
-        asks_name = (
-            "mon nom" in normalized
-            or "je m'appelle comment" in normalized
-            or "je m appelle comment" in normalized
-            or "qui je suis" in normalized
-            or "qui suis-je" in normalized
-        )
-        if not asks_name:
-            return None
-
-        name = self.memory.get("user.name")
-        if not name:
-            return "Je ne connais pas encore ton nom."
-
-        return f"Ton nom est {name.value}."
 
     async def _force_final_response(
         self,
@@ -286,16 +70,13 @@ class AgentRuntime:
         )
         messages = [
             {"role": "system", "content": correction_prompt},
-            *[
-                {"role": message.role, "content": message.content}
-                for message in self.state.messages
-            ],
+            *self.conversation.get_messages_as_dicts(),
             {"role": "user", "content": instruction},
         ]
 
         raw = await self.llm.chat(messages)
-        action = self._parse_action(raw)
-        response = self._final_content(action)
+        action = self.parser.parse_action(raw)
+        response = str(action.args.get("content", ""))
 
         if response:
             return response
@@ -319,13 +100,12 @@ class AgentRuntime:
             if tool.return_direct:
                 return result
 
-            self.add_assistant_message(f"[tool:{tool.name}] {result}")
+            self.conversation.add_assistant_message(f"[tool:{tool.name}] {result}")
             return await self._force_final_response(
                 system_prompt,
                 f'Observation du tool "{tool.name}": {result}. Utilise cette observation pour repondre.'
             )
         except ToolExecutionError as e:
-            # Refus motivé renvoyé à l'utilisateur/LLM
             if self.event_bus:
                 await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": str(e)})
             return str(e)
@@ -337,37 +117,31 @@ class AgentRuntime:
             await self.event_bus.emit("agent.started", {"trace_id": trace_id, "user_input": user_input})
 
         try:
-            self.add_user_message(user_input)
-            self._learn_long_term_facts(user_input)
-            memory_response = self._answer_from_memory(user_input)
+            self.conversation.add_user_message(user_input)
+            self.memory_manager.learn_facts(user_input)
+            memory_response = self.memory_manager.answer_from_memory(user_input)
+            
             if memory_response:
-                self.add_assistant_message(memory_response)
-                self._trim_history()
+                self.conversation.add_assistant_message(memory_response)
+                self.conversation.trim_history()
                 self.logger.info("Agent runtime finished")
                 return memory_response
 
-            system_prompt = self._build_system_prompt(user_input)
-            unknown_tool = self._unknown_requested_tool(user_input)
-
-            if unknown_tool:
-                response = (
-                    f'Je n\'ai pas acces au tool "{unknown_tool}". '
-                    f"Tools disponibles: {self._available_tool_names()}."
-                )
-                self.add_assistant_message(response)
-                self._trim_history()
-                self.logger.info("Agent runtime finished")
-                return response
+            system_prompt = self.prompter.build_system_prompt(
+                self.tools, 
+                self.memory_manager.memory, 
+                user_input
+            )
 
             raw = await self.llm.chat(self._build_messages(system_prompt))
-            action = self._parse_action(raw)
+            action = self.parser.parse_action(raw)
 
             tool_name = action.tool
             args = action.args
 
             if tool_name == "final":
-                response = self._final_content(action)
-                if self._is_low_quality_final(response):
+                response = str(args.get("content", ""))
+                if response.strip().lower() in {"", "final", "json", "reponse finale"}:
                     response = await self._force_final_response(
                         system_prompt,
                         "La reponse precedente est un marqueur technique. "
@@ -377,10 +151,8 @@ class AgentRuntime:
                 tool = self.tools.get(str(tool_name))
 
                 if not tool:
-                    response = (
-                        f'Je n\'ai pas acces au tool "{tool_name}". '
-                        f"Tools disponibles: {self._available_tool_names()}."
-                    )
+                    available = ", ".join([t.name for t in self.tools.list_tools()])
+                    response = f"Outil '{tool_name}' inconnu. Outils disponibles : {available}."
                 elif not self._is_tool_allowed(tool, user_input):
                     response = await self._force_final_response(
                         system_prompt,
@@ -401,8 +173,8 @@ class AgentRuntime:
             if not response:
                 response = raw.strip()
 
-            self.add_assistant_message(response)
-            self._trim_history()
+            self.conversation.add_assistant_message(response)
+            self.conversation.trim_history()
 
             self.logger.info("Agent runtime finished")
 
@@ -412,73 +184,7 @@ class AgentRuntime:
             if self.event_bus:
                 await self.event_bus.emit("agent.failed", {"trace_id": trace_id, "error": str(e)})
             raise
-        if memory_response:
-            self.add_assistant_message(memory_response)
-            self._trim_history()
-            self.logger.info("Agent runtime finished")
-            return memory_response
-
-        system_prompt = self._build_system_prompt(user_input)
-        unknown_tool = self._unknown_requested_tool(user_input)
-
-        if unknown_tool:
-            response = (
-                f'Je n\'ai pas acces au tool "{unknown_tool}". '
-                f"Tools disponibles: {self._available_tool_names()}."
-            )
-            self.add_assistant_message(response)
-            self._trim_history()
-            self.logger.info("Agent runtime finished")
-            return response
-
-        raw = await self.llm.chat(self._build_messages(system_prompt))
-        action = self._parse_action(raw)
-
-        tool_name = action.tool
-        args = action.args
-
-        if tool_name == "final":
-            response = self._final_content(action)
-            if self._is_low_quality_final(response):
-                response = await self._force_final_response(
-                    system_prompt,
-                    "La reponse precedente est un marqueur technique. "
-                    "Reponds vraiment a la demande de l utilisateur.",
-                )
-        else:
-            tool = self.tools.get(str(tool_name))
-
-            if not tool:
-                response = (
-                    f'Je n\'ai pas acces au tool "{tool_name}". '
-                    f"Tools disponibles: {self._available_tool_names()}."
-                )
-            elif not self._is_tool_allowed(tool, user_input):
-                response = await self._force_final_response(
-                    system_prompt,
-                    (
-                        f'Le tool "{tool.name}" n est pas pertinent pour cette '
-                        "demande. Reponds naturellement a l utilisateur."
-                    ),
-                )
-            else:
-                response = await self._run_tool(
-                    tool=tool,
-                    args=args,
-                    user_input=user_input,
-                    system_prompt=system_prompt,
-                )
-
-        if not response:
-            response = raw.strip()
-
-        self.add_assistant_message(response)
-        self._trim_history()
-
-        self.logger.info("Agent runtime finished")
-
-        return response
 
     def reset(self) -> None:
-        self.state = AgentState()
+        self.conversation.reset()
         self.logger.info("Agent state reset")
