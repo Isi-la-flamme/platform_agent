@@ -1,7 +1,8 @@
 import asyncio
-import functools
+import inspect
 import time
 from typing import Any
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from src.domain.protocols.tool import Tool, ToolProvider
 from src.domain.protocols.logger import LoggerProtocol
 from src.domain.protocols.event_bus import EventBus
@@ -15,12 +16,14 @@ class ToolExecutor:
         tools: ToolProvider, 
         logger: LoggerProtocol,
         default_timeout: float = 5.0,
+        max_retries: int = 3,
         allowed_tools: set[str] | None = None,
         event_bus: EventBus | None = None
     ) -> None:
         self.tools = tools
         self.logger = logger
         self.default_timeout = default_timeout
+        self.max_retries = max_retries
         self.allowed_tools = allowed_tools
         self.event_bus = event_bus
 
@@ -54,17 +57,16 @@ class ToolExecutor:
                 if req_arg not in args:
                     raise ToolExecutionError(f"Argument manquant '{req_arg}' pour l'outil '{tool_name}'.")
 
-            # 3. Exécution avec Timeout strict et isolation de thread
-            # On utilise run_in_executor pour ne pas bloquer l'event loop si le tool est CPU-bound
-            loop = asyncio.get_running_loop()
-            
-            # Si execute n'est pas déjà une coroutine, on l'enveloppe
-            execute_func = functools.partial(tool.execute, **args)
-            
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: asyncio.run(tool.execute(**args)) if asyncio.iscoroutinefunction(tool.execute) else tool.execute(**args)),
-                timeout=self.default_timeout
+            # 3. Exécution avec Retries, Timeout et Isolation
+            # On configure tenacity pour ne pas réessayer si c'est une ToolExecutionError (erreur logique/validation)
+            retrier = AsyncRetrying(
+                stop=stop_after_attempt(self.max_retries),
+                wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                retry=retry_if_not_exception_type(ToolExecutionError),
+                reraise=True
             )
+
+            result = await retrier(self._invoke_tool, tool, args)
             
             duration = time.perf_counter() - start_time
             self.logger.info(f"[AUDIT] SUCCESS | tool={tool_name} | duration={duration:.3f}s")
@@ -93,4 +95,20 @@ class ToolExecutor:
                     "tool": tool_name, 
                     "error": str(e)
                 })
-            raise ToolExecutionError(f"Erreur d'exécution : {str(e)}")
+            raise ToolExecutionError(f"Erreur d'exécution : {str(e)}") from e
+
+    async def _invoke_tool(self, tool: Tool, args: dict[str, Any]) -> Any:
+        """Invoque l'outil dans un thread séparé pour l'isolation et applique le timeout."""
+        
+        def wrapper():
+            # Isolation : on exécute l'outil dans son propre thread. 
+            # S'il est async, on crée une nouvelle boucle d'événements locale à ce thread.
+            if inspect.iscoroutinefunction(tool.execute):
+                return asyncio.run(tool.execute(**args))
+            return tool.execute(**args)
+
+        # asyncio.to_thread utilise le pool de threads par défaut pour ne pas bloquer la boucle principale
+        return await asyncio.wait_for(
+            asyncio.to_thread(wrapper),
+            timeout=self.default_timeout
+        )
