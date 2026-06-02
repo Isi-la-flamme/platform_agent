@@ -14,6 +14,7 @@ class FileCrudTool:
         "content": "Contenu pour create/update.",
         "mode": "Pour update: overwrite ou append. Defaut: overwrite.",
     }
+    optional_args = ("mode",)
     return_direct = True
     trigger_words: tuple[str, ...] = (
         "fichier",

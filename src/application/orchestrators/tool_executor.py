@@ -62,6 +62,10 @@ class ToolExecutor:
                 "args": args
             })
 
+        # Validation du schéma de base
+        if not isinstance(args, dict):
+            raise ToolExecutionError(f"Arguments invalides : attendu un dictionnaire, reçu {type(args).__name__}")
+
         try:
             if hasattr(tool, "infer_args"):
                 args = tool.infer_args(user_input, args)
@@ -71,7 +75,10 @@ class ToolExecutor:
                 if arg_name not in tool.args_schema:
                     raise ToolExecutionError(f"Argument '{arg_name}' invalide pour l'outil '{tool_name}'.")
             
+            optional_args = getattr(tool, "optional_args", ())
             for req_arg in tool.args_schema.keys():
+                if req_arg in optional_args or args.get(req_arg) is not None:
+                    continue
                 if req_arg not in args:
                     raise ToolExecutionError(f"Argument manquant '{req_arg}' pour l'outil '{tool_name}'.")
 
@@ -116,7 +123,7 @@ class ToolExecutor:
                     "tool": tool_name, 
                     "error": str(e)
                 })
-            raise ToolExecutionError(f"Erreur d'exécution : {str(e)}") from e
+            raise ToolExecutionError(f"Échec de l'outil '{tool_name}': {str(e)}") from e
 
     async def _invoke_tool(self, tool: Tool, args: dict[str, Any]) -> Any:
         """Invoque l'outil dans un thread séparé pour l'isolation et applique le timeout."""

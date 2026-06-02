@@ -17,7 +17,7 @@ class PythonCodeTool:
     description = (
         "Execute du code Python isole. Utile pour les calculs complexes, "
         "le traitement de donnees ou la logique algorithmique. "
-        "Securise : pas d'acces au systeme de fichiers ou au reseau."
+        "Securise : pas d'acces au systeme de fichiers, au reseau ou aux variables d'environnement."
     )
     args_schema = {
         "code": "Code Python complet a executer.",
@@ -29,7 +29,16 @@ class PythonCodeTool:
     MAX_MEMORY_MB = 128
     
     # Whitelist de mots interdits (protection supplémentaire contre l'évasion)
-    FORBIDDEN_KEYWORDS = {"__subclasses__", "__mro__", "getattr", "setattr", "eval", "exec", "pickle"}
+    FORBIDDEN_KEYWORDS = {
+        "__subclasses__", 
+        "__mro__", 
+        "getattr", 
+        "setattr", 
+        "eval", 
+        "exec", 
+        "pickle",
+        "os.environ"
+    }
 
     def infer_args(self, user_input: str, args: dict[str, Any]) -> dict[str, Any]:
         """Tente d'extraire le bloc de code Python si le LLM l'oublie dans les args."""
@@ -53,10 +62,10 @@ class PythonCodeTool:
                 return f"Erreur de sécurité : Mot-clé interdit '{forbidden}' détecté."
 
         # 2. Check for dangerous imports BEFORE execution
-        dangerous_modules = {"os", "sys", "subprocess", "socket", "urllib", "requests", "pathlib", "shutil"}
+        dangerous_modules = {"os", "sys", "subprocess", "socket", "urllib", "requests", "pathlib", "shutil", "threading", "multiprocessing"}
         import_pattern = r"(?:^|\n)\s*(?:import|from)\s+(\w+)"
         for match in re.finditer(import_pattern, code):
-            module = match.group(1)
+            module = match.group(1).split('.')[0]
             if module in dangerous_modules:
                 return f"Import interdit: {module}"
 

@@ -5,6 +5,7 @@ class Tool(Protocol):
     name: str
     description: str
     args_schema: dict[str, str]
+    optional_args: tuple[str, ...]
     return_direct: bool
     trigger_words: tuple[str, ...]
 

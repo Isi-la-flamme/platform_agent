@@ -107,8 +107,7 @@ async def test_python_tool_security_penetration() -> None:
     runtime = AgentRuntime(llm_attack_1, NullLogger(), registry)
     response = await runtime.run("execute python: import os")
     
-    assert "Erreur d'execution" in response
-    assert "name '__import__' is not defined" in response or "ImportError" in response
+    assert response == "Import interdit: os"
 
     # Scénario 2 : Tentative d'accès aux fichiers via open()
     llm_attack_2 = FakeLLM([

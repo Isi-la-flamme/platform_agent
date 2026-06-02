@@ -5,6 +5,8 @@ import pytest
 from src.application.orchestrators.agent_runtime import AgentRuntime
 from src.domain.protocols.logger import LoggerProtocol
 from src.infrastructure.tools.calculator_tool import CalculatorTool
+from src.infrastructure.tools.datetime_tool import DateTimeTool
+from src.infrastructure.tools.default_tools import register_default_tools
 from src.infrastructure.tools.echo_tool import EchoTool
 from src.infrastructure.tools.text_stats_tool import TextStatsTool
 from src.infrastructure.tools.tool_registry import ToolRegistry
@@ -58,6 +60,7 @@ def build_runtime_with_utilities(responses: list[str]) -> AgentRuntime:
     registry = ToolRegistry()
     registry.register(EchoTool())
     registry.register(CalculatorTool())
+    registry.register(DateTimeTool())
     registry.register(TextStatsTool())
     return AgentRuntime(FakeLLM(responses), NullLogger(), registry)
 
@@ -73,6 +76,32 @@ async def test_extracts_json_when_model_wraps_it_in_text() -> None:
     response = await runtime.run("salut")
 
     assert response == "Bonjour"
+
+
+@pytest.mark.asyncio
+async def test_accepts_response_text_final_variant() -> None:
+    runtime = build_runtime(
+        [
+            '{"response":"final","text":"Bonjour !"}',
+        ]
+    )
+
+    response = await runtime.run("salut")
+
+    assert response == "Bonjour !"
+
+
+@pytest.mark.asyncio
+async def test_accepts_message_final_variant() -> None:
+    runtime = build_runtime(
+        [
+            '{"message":"Salut ISI la flamme !"}',
+        ]
+    )
+
+    response = await runtime.run("salut")
+
+    assert response == "Salut ISI la flamme !"
 
 
 @pytest.mark.asyncio
@@ -103,7 +132,11 @@ async def test_echo_args_are_filled_from_user_input_when_missing() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_tool_is_converted_to_final_response() -> None:
-    runtime = build_runtime([])
+    runtime = build_runtime(
+        [
+            '{"tool":"helloworld","args":{}}',
+        ]
+    )
 
     response = await runtime.run("utilise le tool helloworld")
 
@@ -141,6 +174,100 @@ async def test_low_quality_final_marker_is_retried() -> None:
 
 
 @pytest.mark.asyncio
+async def test_none_tool_is_retried_as_final_response() -> None:
+    runtime = build_runtime(
+        [
+            '{"tool":"None","args":{}}',
+            '{"tool":"final","args":{"content":"Salut !"}}',
+        ]
+    )
+
+    response = await runtime.run("salut")
+
+    assert response == "Salut !"
+
+
+@pytest.mark.asyncio
+async def test_none_final_content_is_retried() -> None:
+    runtime = build_runtime(
+        [
+            '{"tool":"final","args":{"content":"None"}}',
+            '{"tool":"final","args":{"content":"Salut !"}}',
+        ]
+    )
+
+    response = await runtime.run("salut")
+
+    assert response == "Salut !"
+
+
+@pytest.mark.asyncio
+async def test_plain_plan_final_text_is_retried() -> None:
+    runtime = build_runtime(
+        [
+            "Plan actuel :\nPas encore de tâche à effectuer.\n\nFinal",
+            '{"tool":"final","args":{"content":"Salut !"}}',
+        ]
+    )
+
+    response = await runtime.run("salut")
+
+    assert response == "Salut !"
+
+
+@pytest.mark.asyncio
+async def test_bare_low_quality_words_are_retried() -> None:
+    runtime = build_runtime(
+        [
+            "plan",
+            '{"tool":"final","args":{"content":"Je reste simple."}}',
+        ]
+    )
+
+    response = await runtime.run("de fois tu dis plan pour rien")
+
+    assert response == "Je reste simple."
+
+
+@pytest.mark.asyncio
+async def test_plan_dict_without_tool_is_retried() -> None:
+    runtime = build_runtime(
+        [
+            (
+                '{"goal":"Lister les fichiers",'
+                '"tasks":[{"description":"x","status":"pending"}]}'
+            ),
+            (
+                '{"tool":"final",'
+                '"args":{"content":"Je peux lister les tools disponibles."}}'
+            ),
+        ]
+    )
+
+    response = await runtime.run("liste des fichiers")
+
+    assert response == "Je peux lister les tools disponibles."
+
+
+@pytest.mark.asyncio
+async def test_tools_list_is_answered_without_llm_tool_confusion() -> None:
+    runtime = build_runtime([])
+
+    response = await runtime.run("liste des tools disponibles")
+
+    assert response.startswith("Tools disponibles :")
+    assert "- echo:" in response
+
+
+def test_default_tools_include_web_fetch() -> None:
+    registry = ToolRegistry()
+
+    register_default_tools(registry)
+
+    assert registry.get("web_fetch") is not None
+
+
+@pytest.mark.asyncio
 async def test_calculator_returns_directly() -> None:
     runtime = build_runtime_with_utilities(
         [
@@ -151,6 +278,37 @@ async def test_calculator_returns_directly() -> None:
     response = await runtime.run("calcule 2 + 2 * 3")
 
     assert response == "8"
+
+
+@pytest.mark.asyncio
+async def test_calculator_still_runs_when_plan_uses_done_status() -> None:
+    runtime = build_runtime_with_utilities(
+        [
+            (
+                '{"tool":"calculator","args":{"expression":"9 ** 5"},'
+                '"plan":{"goal":"Calculer 9 puissance 5",'
+                '"tasks":[{"description":"Evaluer 9 ** 5","status":"done"}]}}'
+            ),
+        ]
+    )
+
+    response = await runtime.run("calcul 9 puissance 5")
+
+    assert response == "59049"
+
+
+@pytest.mark.asyncio
+async def test_datetime_accepts_europe_paris_from_model() -> None:
+    runtime = build_runtime_with_utilities(
+        [
+            '{"tool":"datetime","args":{"timezone":"Europe/Paris"}}',
+        ]
+    )
+
+    response = await runtime.run("donne lheure utc +2")
+
+    assert "Timezone inconnue" not in response
+    assert "UTC+02:00" in response or "CEST" in response or "CET" in response
 
 
 @pytest.mark.asyncio

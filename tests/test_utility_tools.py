@@ -1,11 +1,13 @@
 import re
 
+import httpx
 import pytest
 
 from src.infrastructure.tools.calculator_tool import CalculatorTool
 from src.infrastructure.tools.datetime_tool import DateTimeTool
 from src.infrastructure.tools.python_code_tool import PythonCodeTool
 from src.infrastructure.tools.text_stats_tool import TextStatsTool
+from src.infrastructure.tools.web_fetch_tool import WebFetchTool
 
 
 @pytest.mark.asyncio
@@ -33,6 +35,25 @@ async def test_datetime_returns_current_utc_timestamp() -> None:
     result = await tool.execute(timezone="UTC")
 
     assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC", result)
+
+
+@pytest.mark.asyncio
+async def test_datetime_accepts_utc_offset() -> None:
+    tool = DateTimeTool()
+
+    result = await tool.execute(timezone="UTC+2")
+
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\+02:00", result)
+
+
+@pytest.mark.asyncio
+async def test_datetime_accepts_common_iana_timezone_on_windows() -> None:
+    tool = DateTimeTool()
+
+    result = await tool.execute(timezone="Europe/Paris")
+
+    assert "Timezone inconnue" not in result
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ", result)
 
 
 @pytest.mark.asyncio
@@ -71,3 +92,40 @@ async def test_python_code_tool_blocks_dangerous_imports() -> None:
     result = await tool.execute(code="import os\nprint(os.getcwd())")
 
     assert result == "Import interdit: os"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_rejects_non_http_urls() -> None:
+    tool = WebFetchTool()
+
+    result = await tool.execute(url="file:///etc/passwd")
+
+    assert result == "URL refusee: utilise http:// ou https://."
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_reads_html_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"<html><title>x</title><body><h1>Hello web</h1></body></html>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    tool = WebFetchTool()
+
+    result = await tool.execute(url="https://example.com")
+
+    assert "Hello web" in result
