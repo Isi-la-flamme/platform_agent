@@ -17,3 +17,8 @@ urgences.txt
 logs/app.log
 agent-platform.zip
 logs/app.log
+pytest_output.txt
+pytest_short.txt
+test_results.txt
+logs/app.log
+logs/app.log
