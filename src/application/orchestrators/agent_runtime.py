@@ -17,6 +17,7 @@ from src.application.orchestrators.response_parser import ResponseParser
 from src.application.orchestrators.prompt_manager import PromptManager
 from src.application.orchestrators.conversation_manager import ConversationManager
 from src.application.orchestrators.memory_manager import MemoryManager
+from src.domain.entities.plan import Plan
 
 
 class AgentRuntime:
@@ -44,6 +45,7 @@ class AgentRuntime:
         self.parser = parser or ResponseParser(logger)
         self.prompter = prompter or PromptManager()
         self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
+        self.current_plan: Plan | None = None
 
     def _build_messages(self, system_prompt: str) -> list[dict[str, str]]:
         return [
@@ -110,80 +112,73 @@ class AgentRuntime:
                 await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": str(e)})
             return str(e)
 
-    async def run(self, user_input: str) -> str:
+    async def run(self, user_input: str, max_steps: int = 5) -> str:
         trace_id = str(uuid.uuid4())
-        self.logger.info("Agent runtime started")
+        self.logger.info(f"Autonomous session started | trace_id={trace_id}")
         if self.event_bus:
             await self.event_bus.emit("agent.started", {"trace_id": trace_id, "user_input": user_input})
 
-        try:
-            self.conversation.add_user_message(user_input)
-            self.memory_manager.learn_facts(user_input)
-            memory_response = self.memory_manager.answer_from_memory(user_input)
-            
-            if memory_response:
-                self.conversation.add_assistant_message(memory_response)
-                self.conversation.trim_history()
-                self.logger.info("Agent runtime finished")
-                return memory_response
+        self.conversation.add_user_message(user_input)
+        self.memory_manager.learn_facts(user_input)
 
+        # Court-circuit mémoire
+        memory_response = self.memory_manager.answer_from_memory(user_input)
+        if memory_response:
+            self.conversation.add_assistant_message(memory_response)
+            return memory_response
+
+        step_count = 0
+        last_response = ""
+
+        while step_count < max_steps:
+            step_count += 1
             system_prompt = self.prompter.build_system_prompt(
                 self.tools, 
                 self.memory_manager.memory, 
-                user_input
+                user_input,
+                plan=self.current_plan
             )
 
             raw = await self.llm.chat(self._build_messages(system_prompt))
             action = self.parser.parse_action(raw)
+
+            # Mise à jour du plan si fourni par le LLM
+            if action.plan:
+                self.current_plan = action.plan
+                self.logger.info(f"Plan updated: {len(self.current_plan.tasks)} tasks.")
 
             tool_name = action.tool
             args = action.args
 
             if tool_name == "final":
                 response = str(args.get("content", ""))
-                if response.strip().lower() in {"", "final", "json", "reponse finale"}:
-                    response = await self._force_final_response(
-                        system_prompt,
-                        "La reponse precedente est un marqueur technique. "
-                        "Reponds vraiment a la demande de l utilisateur.",
-                    )
+                if response.strip().lower() in {"", "final", "json"}:
+                    response = await self._force_final_response(system_prompt, "Fournis une réponse réelle.")
+                
+                self.conversation.add_assistant_message(response)
+                self.conversation.trim_history()
+                return response
+
+            # Exécution de l'outil
+            tool = self.tools.get(str(tool_name))
+            if not tool or not self._is_tool_allowed(tool, user_input):
+                observation = f"Erreur: Outil '{tool_name}' non autorisé ou inconnu."
             else:
-                tool = self.tools.get(str(tool_name))
+                observation = await self._run_tool(
+                    tool=tool, args=args, user_input=user_input, 
+                    system_prompt=system_prompt, trace_id=trace_id
+                )
 
-                if not tool:
-                    available = ", ".join([t.name for t in self.tools.list_tools()])
-                    response = f"Outil '{tool_name}' inconnu. Outils disponibles : {available}."
-                elif not self._is_tool_allowed(tool, user_input):
-                    response = await self._force_final_response(
-                        system_prompt,
-                        (
-                            f'Le tool "{tool.name}" n est pas pertinent pour cette '
-                            "demande. Reponds naturellement a l utilisateur."
-                        ),
-                    )
-                else:
-                    response = await self._run_tool(
-                        tool=tool,
-                        args=args,
-                        user_input=user_input,
-                        system_prompt=system_prompt,
-                        trace_id=trace_id,
-                    )
+            # Si l'outil ne retourne pas direct, l'observation est déjà dans l'historique
+            # via _run_tool. Si tool.return_direct est True, on l'ajoute ici.
+            if tool and tool.return_direct:
+                self.conversation.add_assistant_message(f"Observation: {observation}")
+            
+            last_response = observation
 
-            if not response:
-                response = raw.strip()
+        self.logger.warning(f"Max steps ({max_steps}) reached for goal.")
+        return f"Désolé, je n'ai pas pu terminer l'objectif en {max_steps} étapes. Dernier état: {last_response}"
 
-            self.conversation.add_assistant_message(response)
-            self.conversation.trim_history()
-
-            self.logger.info("Agent runtime finished")
-
-            return response
-        except Exception as e:
-            self.logger.error(f"Agent runtime failed: {e}")
-            if self.event_bus:
-                await self.event_bus.emit("agent.failed", {"trace_id": trace_id, "error": str(e)})
-            raise
 
     def reset(self) -> None:
         self.conversation.reset()
