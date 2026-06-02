@@ -155,19 +155,30 @@ class AgentRuntime:
 
             # Exécution de l'outil
             tool = self.tools.get(str(tool_name))
-            if not tool or not self._is_tool_allowed(tool, user_input):
-                observation = f"Erreur: Outil '{tool_name}' non autorisé ou inconnu."
+            if not tool:
+                # Tool inexistant - retourner immédiatement l'erreur
+                available_tools = ", ".join(t.name for t in self.tools.list_tools())
+                observation = f'Je n\'ai pas acces au tool "{tool_name}". Tools disponibles: {available_tools}.'
+                self.conversation.add_assistant_message(observation)
+                self.conversation.trim_history()
+                return observation
+            elif not self._is_tool_allowed(tool, user_input):
+                # Tool non autorisé pour cette demande - continuer la boucle
+                observation = f'L\'outil "{tool_name}" n\'est pas autorisé pour cette demande.'
             else:
                 observation = await self._run_tool(
                     tool=tool, args=args, user_input=user_input, 
                     system_prompt=system_prompt, trace_id=trace_id
                 )
 
-            # Si l'outil ne retourne pas direct, l'observation est déjà dans l'historique
-            # via _run_tool. Si tool.return_direct est True, on l'ajoute ici.
-            if tool and tool.return_direct:
-                self.conversation.add_assistant_message(f"Observation: {observation}")
+            # Si l'outil retourne directement ET était autorisé, retourner immédiatement
+            if tool and tool.return_direct and self._is_tool_allowed(tool, user_input):
+                self.conversation.add_assistant_message(observation)
+                self.conversation.trim_history()
+                return observation
             
+            # Ajouter l'observation à l'historique et continuer la boucle
+            self.conversation.add_assistant_message(observation)
             last_response = observation
 
         self.logger.warning(f"Max steps ({max_steps}) reached for goal.")

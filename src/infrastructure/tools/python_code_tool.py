@@ -1,5 +1,6 @@
 import contextlib
 import io
+import re
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -51,7 +52,15 @@ class PythonCodeTool:
             if forbidden in code:
                 return f"Erreur de sécurité : Mot-clé interdit '{forbidden}' détecté."
 
-        # 2. Limitation des ressources (RAM)
+        # 2. Check for dangerous imports BEFORE execution
+        dangerous_modules = {"os", "sys", "subprocess", "socket", "urllib", "requests", "pathlib", "shutil"}
+        import_pattern = r"(?:^|\n)\s*(?:import|from)\s+(\w+)"
+        for match in re.finditer(import_pattern, code):
+            module = match.group(1)
+            if module in dangerous_modules:
+                return f"Import interdit: {module}"
+
+        # 3. Limitation des ressources (RAM)
         if resource_module:
             # On limite la mémoire vive allouée (Soft & Hard limits)
             limit_bytes = self.MAX_MEMORY_MB * 1024 * 1024
@@ -68,6 +77,16 @@ class PythonCodeTool:
             "range": range, "reversed": reversed, "round": round,
             "set": set, "sorted": sorted, "str": str, "sum": sum,
             "tuple": tuple, "zip": zip,
+            # Exception types
+            "ValueError": ValueError,
+            "TypeError": TypeError,
+            "RuntimeError": RuntimeError,
+            "Exception": Exception,
+            "KeyError": KeyError,
+            "IndexError": IndexError,
+            "NameError": NameError,
+            "AttributeError": AttributeError,
+            "ZeroDivisionError": ZeroDivisionError,
         }
 
         # Utilisation d'un dictionnaire de globals restreint
@@ -79,6 +98,9 @@ class PythonCodeTool:
             with contextlib.redirect_stdout(stdout_capture):
                 exec(code, safe_globals)
             output = stdout_capture.getvalue()
-            return output if output else "Succes (aucune sortie console)."
+            if output:
+                return f"Code sortie: 0\nstdout:\n{output}"
+            else:
+                return "Code sortie: 0\nSucces (aucune sortie console)."
         except Exception as exc:
-            return f"Erreur d'execution ({type(exc).__name__}): {exc}"
+            return f"Code sortie: 1\n{type(exc).__name__}: {exc}"
