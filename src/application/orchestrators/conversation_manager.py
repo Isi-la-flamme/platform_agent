@@ -1,6 +1,7 @@
 from src.domain.entities.agent import AgentState
 from src.domain.entities.message import Message
 
+
 class ConversationManager:
     """Gère l'historique des messages et l'état de la session."""
     

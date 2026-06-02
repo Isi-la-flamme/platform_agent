@@ -1,7 +1,9 @@
 import json
 from typing import Any
+
 from src.domain.entities.tool_call import ToolCall
 from src.domain.protocols.logger import LoggerProtocol
+
 
 class ResponseParser:
     """Responsable de l'extraction et de la validation des réponses du LLM."""
@@ -21,7 +23,7 @@ class ResponseParser:
 
         # Fallback sécurisé en cas d'échec de validation ou JSON corrompu
         content = str(parsed) if parsed is not None else raw.strip()
-        return ToolCall(tool="final", args={"content": content})
+        return ToolCall(tool="final", args={"content": content}, plan=None)
 
     def _extract_json(self, raw: str) -> Any:
         """Logique d'extraction robuste (Markdown, texte entourant, etc)."""

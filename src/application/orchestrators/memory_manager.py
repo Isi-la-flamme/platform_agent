@@ -1,5 +1,7 @@
 import re
+
 from src.domain.protocols.memory import LongTermMemory
+
 
 class MemoryManager:
     """Gère l'extraction de faits et la récupération de données personnelles."""

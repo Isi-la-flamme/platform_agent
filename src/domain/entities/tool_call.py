@@ -1,6 +1,9 @@
 from typing import Any
+
 from pydantic import BaseModel, Field
+
 from src.domain.entities.plan import Plan
+
 
 class ToolCall(BaseModel):
     """Structure stricte d'un appel d'outil."""

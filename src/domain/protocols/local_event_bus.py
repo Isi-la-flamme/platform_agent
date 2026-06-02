@@ -1,5 +1,8 @@
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from src.domain.protocols.event_bus import EventBus
+
 
 class LocalEventBus(EventBus):
     """Implémentation locale simple du bus d'événements."""

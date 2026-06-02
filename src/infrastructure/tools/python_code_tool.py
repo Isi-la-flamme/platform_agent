@@ -1,12 +1,14 @@
-import io
-import sys
 import contextlib
-from typing import Any
-try:
-    import resource  # Uniquement sur Unix
-except ImportError:
-    resource = None
-import multiprocessing
+import io
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import resource as resource_module
+else:
+    try:
+        import resource as resource_module  # Uniquement sur Unix
+    except ImportError:
+        resource_module = None  # type: ignore
 
 
 class PythonCodeTool:
@@ -50,11 +52,11 @@ class PythonCodeTool:
                 return f"Erreur de sécurité : Mot-clé interdit '{forbidden}' détecté."
 
         # 2. Limitation des ressources (RAM)
-        if resource:
+        if resource_module:
             # On limite la mémoire vive allouée (Soft & Hard limits)
             limit_bytes = self.MAX_MEMORY_MB * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
-            resource.setrlimit(resource.RLIMIT_CPU, (5, 5)) # Max 5 sec CPU
+            resource_module.setrlimit(resource_module.RLIMIT_AS, (limit_bytes, limit_bytes))  # type: ignore
+            resource_module.setrlimit(resource_module.RLIMIT_CPU, (5, 5))  # type: ignore  # Max 5 sec CPU
 
         # Environnement restreint (Sandbox)
         # On limite les builtins pour empecher __import__, open, eval, etc.

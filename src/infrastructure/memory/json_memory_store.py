@@ -1,6 +1,4 @@
 import json
-from dataclasses import asdict
-from datetime import UTC, datetime
 from pathlib import Path
 
 from src.domain.entities.memory import MemoryFact
@@ -17,7 +15,6 @@ class JsonMemoryStore:
             key=key,
             value=value,
             text=text,
-            updated_at=datetime.now(UTC).isoformat(),
         )
         self._facts[key] = fact
         self._save()
@@ -62,7 +59,6 @@ class JsonMemoryStore:
                     key=str(item["key"]),
                     value=str(item["value"]),
                     text=str(item["text"]),
-                    updated_at=str(item["updated_at"]),
                 )
             except KeyError:
                 continue
@@ -71,7 +67,7 @@ class JsonMemoryStore:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [asdict(fact) for fact in self._facts.values()]
+        payload = [fact.model_dump() for fact in self._facts.values()]
         self.path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",

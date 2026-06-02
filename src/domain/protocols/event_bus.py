@@ -1,4 +1,6 @@
-from typing import Any, Callable, Awaitable, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
+
 
 class EventBus(Protocol):
     """Protocole pour le bus d'événements de l'agent."""

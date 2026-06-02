@@ -1,6 +1,8 @@
+
 import chromadb
-from typing import List, Optional
+
 from src.domain.entities.memory import MemoryFact
+
 
 class ChromaMemoryStore:
     """
@@ -19,44 +21,60 @@ class ChromaMemoryStore:
             metadatas=[{"key": key, "value": value}]
         )
 
-    def get(self, key: str) -> Optional[MemoryFact]:
+    def get(self, key: str) -> MemoryFact | None:
         """Récupère un fait spécifique par sa clé."""
         result = self.collection.get(ids=[key])
         if not result["ids"]:
             return None
+        ids = result["ids"]
+        metadatas = result["metadatas"]
+        documents = result["documents"]
+        if not ids or not metadatas or not documents:
+            return None
         return MemoryFact(
-            key=result["ids"][0],
-            value=result["metadatas"][0]["value"],
-            text=result["documents"][0]
+            key=str(ids[0]),
+            value=str(metadatas[0]["value"]),
+            text=str(documents[0])
         )
 
-    def search(self, query: str, limit: int = 5) -> List[MemoryFact]:
+    def search(self, query: str, limit: int = 5) -> list[MemoryFact]:
         """Effectue une recherche sémantique (similarité) sur les faits mémorisés."""
         results = self.collection.query(
             query_texts=[query],
             n_results=limit
         )
-        
-        facts = []
+
+        facts: list[MemoryFact] = []
         if not results["ids"] or not results["ids"][0]:
             return facts
-            
-        for i in range(len(results["ids"][0])):
+
+        ids_list = results["ids"][0]
+        metadatas_list = results["metadatas"][0] if results["metadatas"] else []
+        documents_list = results["documents"][0] if results["documents"] else []
+        if not ids_list or not metadatas_list or not documents_list:
+            return facts
+
+        for i in range(len(ids_list)):
             facts.append(MemoryFact(
-                key=results["ids"][0][i],
-                value=results["metadatas"][0][i]["value"],
-                text=results["documents"][0][i]
+                key=str(ids_list[i]),
+                value=str(metadatas_list[i]["value"]),
+                text=str(documents_list[i])
             ))
         return facts
 
-    def all(self) -> List[MemoryFact]:
+    def all(self) -> list[MemoryFact]:
         """Récupère tous les faits mémorisés (utile pour le contexte global)."""
         results = self.collection.get()
-        facts = []
-        for i in range(len(results["ids"])):
+        facts: list[MemoryFact] = []
+        ids = results["ids"]
+        metadatas = results["metadatas"]
+        documents = results["documents"]
+        if not ids or not metadatas or not documents:
+            return facts
+        for i in range(len(ids)):
             facts.append(MemoryFact(
-                key=results["ids"][i],
-                value=results["metadatas"][i]["value"],
-                text=results["documents"][i]
+                key=str(ids[i]),
+                value=str(metadatas[i]["value"]),
+                text=str(documents[i])
             ))
         return facts

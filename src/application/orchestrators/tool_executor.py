@@ -2,10 +2,18 @@ import asyncio
 import inspect
 import time
 from typing import Any
-from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_not_exception_type
-from src.domain.protocols.tool import Tool, ToolProvider
-from src.domain.protocols.logger import LoggerProtocol
+
+from tenacity import (
+    AsyncRetrying,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from src.domain.protocols.event_bus import EventBus
+from src.domain.protocols.logger import LoggerProtocol
+from src.domain.protocols.tool import Tool, ToolProvider
+
 
 class ToolExecutionError(Exception):
     pass
@@ -76,7 +84,7 @@ class ToolExecutor:
                 reraise=True
             )
 
-            result = await retrier(self._invoke_tool, tool, args)
+            result: Any = await retrier(self._invoke_tool, tool, args)
             
             duration = time.perf_counter() - start_time
             self.logger.info(f"[AUDIT] SUCCESS | tool={tool_name} | duration={duration:.3f}s")
@@ -91,7 +99,7 @@ class ToolExecutor:
             
             return str(result)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.logger.error(f"Timeout sur l'outil {tool_name}")
             if self.event_bus:
                 await self.event_bus.emit("agent.failed", {
@@ -112,8 +120,8 @@ class ToolExecutor:
 
     async def _invoke_tool(self, tool: Tool, args: dict[str, Any]) -> Any:
         """Invoque l'outil dans un thread séparé pour l'isolation et applique le timeout."""
-        
-        def wrapper():
+
+        def wrapper() -> Any:
             # Isolation : on exécute l'outil dans son propre thread. 
             # S'il est async, on crée une nouvelle boucle d'événements locale à ce thread.
             if inspect.iscoroutinefunction(tool.execute):
