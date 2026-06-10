@@ -7,133 +7,151 @@ from src.domain.protocols.logger import LoggerProtocol
 
 class ResponseParser:
     """Responsable de l'extraction et de la validation des réponses du LLM."""
-    
+
     def __init__(self, logger: LoggerProtocol) -> None:
         self.logger = logger
 
+    # ----------------------------
+    # MAIN ENTRY
+    # ----------------------------
     def parse_action(self, raw: str) -> ToolCall:
-        """Parse une chaîne brute en un ToolCall validé."""
         parsed = self._extract_json(raw)
 
-        if isinstance(parsed, dict):
-            # Extraction et log de la pensée de l'agent pour audit avant validation
-            thought = parsed.pop("thought", None) or parsed.pop("reasoning", None)
-            if thought:
-                self.logger.info(f"[AGENT-REASONING] {thought}")
+        # 🧨 FIX 1 : fallback strict immédiat
+        if not isinstance(parsed, dict):
+            return ToolCall(
+                tool="final",
+                args={"content": raw},
+                plan=None,
+            )
+
+        # 🧠 log reasoning
+        thought = parsed.pop("thought", None) or parsed.pop("reasoning", None)
+        if thought:
+            self.logger.info(f"[AGENT-REASONING] {thought}")
 
         try:
-            if isinstance(parsed, dict):
-                normalized = self._normalize_common_variants(parsed)
-                if normalized:
-                    return normalized
-                parsed = self._normalize_plan_statuses(parsed)
-                return ToolCall.model_validate(parsed)
+            parsed = self._normalize_args(parsed)
+            parsed = self._force_tool_field(parsed)          # 🔥 FIX IMPORTANT
+            parsed = self._extract_plan_from_args(parsed)
+            parsed = self._sanitize_plan(parsed)
+
+            return ToolCall.model_validate(parsed)
+
         except Exception as e:
             self.logger.warning(f"Validation Pydantic échouée: {e}")
 
-        # Fallback sécurisé en cas d'échec de validation ou JSON corrompu
-        content = raw.strip()
-        return ToolCall(tool="final", args={"content": content}, plan=None)
-
-    def _normalize_common_variants(self, parsed: dict[str, Any]) -> ToolCall | None:
-        """
-        Gère les cas où le LLM omet des champs obligatoires (tool, args)
-        ou renvoie une structure de plan directement à la racine.
-        """
-        if "tool" in parsed:
-            if "args" not in parsed:
-                parsed["args"] = {}
-            return None  # On laisse le flux normal pour la validation Pydantic
-
-        # Si 'tool' est absent, on interprète la réponse comme une réponse finale
-        response = str(parsed.get("response", "")).strip().lower()
-        content = (
-            parsed.get("text") or 
-            parsed.get("content") or 
-            parsed.get("message") or 
-            "Analyse terminée (format corrigé)."
-        )
-
-        # Détection du plan si l'objet racine ressemble à un plan (cas de votre erreur)
-        plan_data = parsed.get("plan")
-        if not plan_data and ("goal" in parsed or "tasks" in parsed):
-            plan_data = parsed.copy()
-
-        # Normalisation des statuts du plan s'il est présent
-        if isinstance(plan_data, dict) and "tasks" in plan_data:
-            temp_wrapper = {"plan": plan_data}
-            self._normalize_plan_statuses(temp_wrapper)
-            plan_data = temp_wrapper["plan"]
-
         return ToolCall(
             tool="final",
-            args={"content": str(content)},
-            plan=plan_data if isinstance(plan_data, dict) and "goal" in plan_data else None,
+            args={"content": raw.strip()},
+            plan=None,
         )
 
-    def _normalize_plan_statuses(self, parsed: dict[str, Any]) -> dict[str, Any]:
-        plan = parsed.get("plan")
-        if not isinstance(plan, dict):
-            return parsed
+    # ----------------------------
+    # FIX 1: args normalization
+    # ----------------------------
+    def _normalize_args(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        args = parsed.get("args", {})
 
-        tasks = plan.get("tasks")
-        if not isinstance(tasks, list):
-            return parsed
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
 
-        status_aliases = {
-            "done": "completed",
-            "finished": "completed",
-            "complete": "completed",
-            "success": "completed",
-            "todo": "pending",
-            "to_do": "pending",
-            "doing": "in_progress",
-            "in progress": "in_progress",
-            "error": "failed",
-            "failure": "failed",
-        }
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            status = str(task.get("status", "")).strip().lower()
-            if status in status_aliases:
-                task["status"] = status_aliases[status]
+        if args is None or not isinstance(args, dict):
+            args = {}
+
+        parsed["args"] = args
+        return parsed
+
+    # ----------------------------
+    # 🔥 FIX 2: FORCE TOOL FIELD (TON BUG ACTUEL)
+    # ----------------------------
+    def _force_tool_field(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        tool = parsed.get("tool")
+
+        if not tool or not isinstance(tool, str):
+            parsed["tool"] = "final"
 
         return parsed
 
+    # ----------------------------
+    # FIX 3: extract plan from args
+    # ----------------------------
+    def _extract_plan_from_args(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        args = parsed.get("args")
+
+        if isinstance(args, dict) and "plan" in args:
+            parsed["plan"] = args.pop("plan")
+
+        return parsed
+
+    # ----------------------------
+    # FIX 4: sanitize plan
+    # ----------------------------
+    def _sanitize_plan(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        plan = parsed.get("plan")
+
+        if not isinstance(plan, dict):
+            return parsed
+
+        plan.pop("args", None)
+
+        tasks = plan.get("tasks")
+        if isinstance(tasks, list):
+            for t in tasks:
+                if not isinstance(t, dict):
+                    continue
+
+                status = str(t.get("status", "")).lower()
+
+                if status in {"done", "finished", "success"}:
+                    t["status"] = "completed"
+                elif status in {"todo", "pending"}:
+                    t["status"] = "pending"
+                elif status in {"doing", "in_progress"}:
+                    t["status"] = "in_progress"
+                elif status in {"error", "failed"}:
+                    t["status"] = "failed"
+
+        return parsed
+
+    # ----------------------------
+    # JSON extraction (robust)
+    # ----------------------------
     def _extract_json(self, raw: str) -> Any:
-        """Logique d'extraction robuste (Markdown, texte entourant, etc)."""
         text = raw.strip()
         decoder = json.JSONDecoder()
 
-        # 1. Tentative directe
+        # 1 direct parse
         try:
             value, _ = decoder.raw_decode(text)
             return value
-        except json.JSONDecodeError:
+        except Exception:
             pass
 
-        # 2. Nettoyage blocs Markdown
+        # 2 markdown block
         if text.startswith("```"):
             cleaned = text.strip("`").strip()
             if cleaned.startswith("json"):
                 cleaned = cleaned[4:].strip()
+
             try:
                 value, _ = decoder.raw_decode(cleaned)
                 return value
-            except json.JSONDecodeError:
+            except Exception:
                 pass
 
-        # 3. Recherche du premier objet JSON dans le texte.
-        # Les chaines JSON seules ("plan", "tool", etc.) ne sont pas des
-        # actions valides pour l'agent.
-        for index, character in enumerate(text):
-            if character != "{":
-                continue
-            try:
-                value, _ = decoder.raw_decode(text[index:])
-                if isinstance(value, dict):
-                    return value
-            except json.JSONDecodeError:
-                continue
-        return raw
+        # 3 brute scan
+        for i, ch in enumerate(text):
+            if ch == "{":
+                try:
+                    value, _ = decoder.raw_decode(text[i:])
+                    if isinstance(value, dict):
+                        return value
+                except Exception:
+                    continue
+
+        # 🔥 FIX FINAL: never return {} silently (causes hidden bugs)
+        return None
