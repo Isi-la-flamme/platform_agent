@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -5,13 +6,13 @@ from typing import Any
 class FileCrudTool:
     name = "file_crud"
     description = (
-        "Cree, lit, modifie ou supprime un fichier dans le workspace. "
+        "Cree, lit, modifie ou supprime un fichier ou un dossier dans le workspace. "
         "Les chemins doivent etre relatifs au projet."
     )
     args_schema = {
         "action": "Action: create, read, update, delete.",
         "path": "Chemin relatif du fichier dans le workspace.",
-        "content": "Contenu pour create/update.",
+        "content": "Contenu du fichier. Pour un dossier: omets ce champ ou termine le 'path' par '/'.",
         "mode": "Pour update: overwrite ou append. Defaut: overwrite.",
     }
     optional_args = ("mode",)
@@ -19,11 +20,21 @@ class FileCrudTool:
     trigger_words: tuple[str, ...] = (
         "fichier",
         "file",
-        "cree le fichier",
-        "crée le fichier",
-        "lis le fichier",
-        "modifie le fichier",
-        "supprime le fichier",
+        "créer",
+        "creer",
+        "crée",
+        "cree",
+        "lire",
+        "lit",
+        "modifier",
+        "modifie",
+        "supprimer",
+        "supprime",
+        "écrire",
+        "ecrire",
+        "dossier",
+        "folder",
+        "repertoire",
     )
 
     _blocked_parts = {
@@ -46,7 +57,7 @@ class FileCrudTool:
     async def execute(self, **kwargs: Any) -> str:
         action = str(kwargs.get("action", "")).strip().lower()
         raw_path = str(kwargs.get("path", "")).strip()
-        content = str(kwargs.get("content", ""))
+        content_val = kwargs.get("content")
         mode = str(kwargs.get("mode", "overwrite")).strip().lower()
 
         if action not in {"create", "read", "update", "delete"}:
@@ -58,11 +69,31 @@ class FileCrudTool:
             return str(exc)
 
         if action == "create":
-            return self._create(path, content)
+            # Détection intelligente du type (Fichier vs Dossier)
+            user_req = str(kwargs.get("user_input", "")).lower()
+            is_explicit_dir = any(w in user_req for w in ["dossier", "folder", "repertoire"])
+            
+            is_dir_request = (
+                raw_path.endswith(("/", "\\")) or 
+                content_val is None or 
+                (isinstance(content_val, str) and not content_val.strip() and is_explicit_dir)
+            )
+
+            if is_dir_request:
+                if path.exists():
+                    return f"Creation refusee: {self._relative(path)} existe deja."
+                path.mkdir(parents=True, exist_ok=True)
+                return f"Dossier cree: {self._relative(path)}"
+            return self._create(path, str(content_val))
+            
         if action == "read":
             return self._read(path)
+            
         if action == "update":
-            return self._update(path, content, mode)
+            if path.is_dir():
+                return "Modification impossible: les dossiers ne peuvent pas etre modifies via update."
+            return self._update(path, str(content_val or ""), mode)
+            
         return self._delete(path)
 
     def _safe_path(self, raw_path: str) -> Path:
@@ -74,7 +105,7 @@ class FileCrudTool:
             raise ValueError("Chemin refuse: utilise un chemin relatif au workspace.")
 
         resolved = (self.root / candidate).resolve()
-        if resolved == self.root or self.root not in resolved.parents:
+        if resolved != self.root and self.root not in resolved.parents:
             raise ValueError("Chemin refuse: sortie du workspace interdite.")
 
         relative_parts = resolved.relative_to(self.root).parts
@@ -96,13 +127,36 @@ class FileCrudTool:
     def _read(self, path: Path) -> str:
         if not path.exists():
             return f"Lecture impossible: {self._relative(path)} introuvable."
-        if not path.is_file():
-            return "Lecture impossible: ce chemin n'est pas un fichier."
+        
+        if path.is_dir():
+            items = sorted([f"{p.name}/" if p.is_dir() else p.name for p in path.iterdir()])
+            header = f"Contenu du dossier {self._relative(path)} :\n"
+            return header + ("\n".join(items) if items else "(dossier vide)")
+
         if path.stat().st_size > self._max_read_bytes:
             return "Lecture refusee: fichier trop volumineux."
 
         content = path.read_text(encoding="utf-8", errors="replace")
         return self._truncate(content)
+    
+    def _delete(self, path: Path) -> str:
+        if not path.exists():
+            return f"Suppression impossible: {self._relative(path)} introuvable."
+        
+        if path == self.root:
+            return "Suppression refusee: impossible de supprimer la racine du workspace."
+
+        if path.is_dir():
+            shutil.rmtree(path)
+            return f"Dossier supprime recursivement : {self._relative(path)}"
+        else:
+            path.unlink()
+            return f"Fichier supprime : {self._relative(path)}"
+
+    def _relative(self, path: Path) -> str:
+        if path == self.root:
+            return "."
+        return path.relative_to(self.root).as_posix()
 
     def _update(self, path: Path, content: str, mode: str) -> str:
         if not path.exists():
@@ -119,18 +173,6 @@ class FileCrudTool:
             path.write_text(content, encoding="utf-8")
 
         return f"Fichier modifie: {self._relative(path)}"
-
-    def _delete(self, path: Path) -> str:
-        if not path.exists():
-            return f"Suppression impossible: {self._relative(path)} introuvable."
-        if not path.is_file():
-            return "Suppression refusee: seuls les fichiers peuvent etre supprimes."
-
-        path.unlink()
-        return f"Fichier supprime: {self._relative(path)}"
-
-    def _relative(self, path: Path) -> str:
-        return path.relative_to(self.root).as_posix()
 
     def _truncate(self, text: str) -> str:
         if len(text) <= self._max_output_chars:

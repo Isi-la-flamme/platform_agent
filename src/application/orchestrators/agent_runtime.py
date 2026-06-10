@@ -1,4 +1,5 @@
 import uuid
+import re
 from typing import Any
 from tenacity import (
     retry,
@@ -58,7 +59,14 @@ class AgentRuntime:
             return True
 
         normalized = user_input.lower()
-        return any(marker in normalized for marker in tool.trigger_words)
+        if any(marker in normalized for marker in tool.trigger_words):
+            return True
+            
+        # Intelligence : Autorise file_crud si on detecte une extension de fichier (ex: index.html)
+        if tool.name == "file_crud" and re.search(r'\.[a-z0-9]{1,5}\b', normalized):
+            return True
+            
+        return False
 
     @retry(
         stop=stop_after_attempt(3),
@@ -153,7 +161,7 @@ class AgentRuntime:
                 await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": error_msg})
             return error_msg
 
-    async def run(self, user_input: str, max_steps: int = 5) -> str:
+    async def run(self, user_input: str, max_steps: int = 10) -> str:
         trace_id = str(uuid.uuid4())
         self.logger.info(f"Autonomous session started | trace_id={trace_id}")
         if self.event_bus:

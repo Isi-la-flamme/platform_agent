@@ -23,6 +23,7 @@ REGLES ABSOLUES :
 - Tu dois repondre uniquement en JSON valide.
 - Pas de markdown hors JSON.
 - Si la tâche est complexe, commence par définir ou mettre à jour un "plan" dans ta réponse.
+- INTENTION : Si l'utilisateur demande une action sur un fichier/dossier, l'outil 'file_crud' est prioritaire.
 - Avant de choisir un outil, verifie si un outil plus specialise ne peut pas faire le travail.
 - NE JAMAIS utiliser 'google_search' pour des calculs ou des cours de crypto si les outils dedies sont presents.
 - Si aucun outil ne correspond du tout, utilise "final".
@@ -36,7 +37,7 @@ class PromptManager:
     """Responsable de la génération des prompts et du formatage du contexte."""
 
     def build_system_prompt(self, tools: ToolProvider, memory: LongTermMemory | None, user_input: str, plan: Plan | None = None) -> str:
-        tool_context = self._format_tools(tools.list_tools())
+        tool_context = self._format_tools(tools.list_tools(), user_input)
         memory_context = self._format_memory(memory, user_input)
         plan_context = self._format_plan(plan)
 
@@ -47,15 +48,18 @@ class PromptManager:
             .replace("__PLAN__", plan_context)
         )
 
-    def _format_tools(self, tools: list[Tool]) -> str:
+    def _format_tools(self, tools: list[Tool], user_input: str = "") -> str:
         if not tools:
             return "- aucun tool disponible"
         
         lines = []
+        normalized_input = user_input.lower()
         for t in tools:
+            is_recommended = any(w in normalized_input for w in t.trigger_words) if t.trigger_words else False
+            prefix = "[RECOMMANDÉ] " if is_recommended else ""
             args = ", ".join([f"{k}: {v}" for k, v in t.args_schema.items()]) or "aucun"
             mode = "retour direct" if t.return_direct else "observation"
-            lines.append(f"- {t.name}: {t.description} (Args: {args})")
+            lines.append(f"- {prefix}{t.name}: {t.description} (Args: {args})")
         return "\n".join(lines)
 
     def _format_memory(self, memory: LongTermMemory | None, user_input: str) -> str:
