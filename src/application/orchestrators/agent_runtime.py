@@ -15,7 +15,7 @@ from src.application.orchestrators.response_parser import ResponseParser
 from src.application.orchestrators.tool_executor import ToolExecutionError, ToolExecutor
 from src.application.orchestrators.planner import Planner
 from src.application.orchestrators.scheduler import Scheduler
-
+from src.application.memory_v2.memory_v2 import MemoryV2
 from src.domain.entities.plan import Plan
 from src.domain.protocols.event_bus import EventBus
 from src.domain.protocols.llm_provider import LLMProvider
@@ -43,12 +43,14 @@ class AgentRuntime:
         self.logger = logger
         self.tools = tools
         self.event_bus = event_bus
+        
 
         # Core modules
         self.conversation = ConversationManager(self.MAX_MESSAGES)
         self.memory_manager = MemoryManager(memory)
         self.parser = parser or ResponseParser(logger)
         self.prompter = prompter or PromptManager()
+        self.memory_v2 = MemoryV2()
         self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
 
         # 🧠 FIX IMPORTANT : composants manquants ajoutés
@@ -74,6 +76,9 @@ class AgentRuntime:
 
         if tool.name == "file_crud" and re.search(r'\.[a-z0-9]{1,5}\b', normalized):
             return True
+        
+        if tool.name == "echo" and not tool.chat_safe:
+            return  self.force_final_response(...)
 
         return False
 
@@ -127,53 +132,104 @@ class AgentRuntime:
                 await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": msg})
             return msg
 
+
     async def run(self, user_input: str, max_steps: int = 10) -> str:
         trace_id = str(uuid.uuid4())
+
         self.logger.info(f"Autonomous session started | trace_id={trace_id}")
 
         if self.event_bus:
-            await self.event_bus.emit("agent.started", {"trace_id": trace_id})
+            await self.event_bus.emit(
+                "agent.started",
+                {"trace_id": trace_id, "user_input": user_input},
+            )
+
+        # =========================
+        # MEMORY WRITE (INPUT)
+        # =========================
+        self.memory_v2.store_episode(user_input, {"type": "input"})
 
         self.conversation.add_user_message(user_input)
         self.memory_manager.learn_facts(user_input)
 
+        # =========================
+        # TOOL SHORTCUT
+        # =========================
         tools_response = self._answer_tools_list_if_requested(user_input)
         if tools_response:
+            self.memory_v2.store_episode(user_input, {"type": "tool_list", "output": tools_response})
             return tools_response
 
+        # =========================
+        # MEMORY SHORTCUT
+        # =========================
         memory_response = self.memory_manager.answer_from_memory(user_input)
         if memory_response:
+            self.memory_v2.store_episode(user_input, {"type": "memory_hit", "output": memory_response})
             return memory_response
+
+        # =========================
+        # PLAN INIT (FIX IMPORTANT)
+        # =========================
+        if self.current_plan is None or len(getattr(self.current_plan, "tasks", [])) == 0:
+            self.current_plan = await self.planner.create_plan(user_input)
 
         last_response = ""
 
         for _ in range(max_steps):
 
-            task = None
+            # =========================
+            # TASK PICK
+            # =========================
+            task = self.scheduler.get_next_task(self.current_plan) if self.current_plan else None
+            task_query = task.description if task else user_input
 
-            if self.current_plan:
-                task = self.scheduler.get_next_task(self.current_plan)
+            # =========================
+            # MEMORY RETRIEVAL (SAFE)
+            # =========================
+            retrieved = self.memory_v2.retrieve(task_query)
 
+            memory_context = "\n".join(
+                f"- {getattr(m, 'content', str(m))}"
+                for m in retrieved[:5]
+            )
+
+            # =========================
+            # PROMPT BUILD
+            # =========================
             system_prompt = self.prompter.build_system_prompt(
                 self.tools,
                 self.memory_manager.memory,
                 user_input,
-                plan=self.current_plan
+                plan=self.current_plan,
             )
 
-            if task:
-                system_prompt += f"\n\nTACHE ACTIVE: {task.description}"
-                task.status = "in_progress"
+            if memory_context:
+                system_prompt += f"\n\nMEMORY V2:\n{memory_context}"
 
+            if task:
+                system_prompt += f"\n\nTACHE ACTIVE:\n{task.description}"
+                if task.status == "pending":
+                    task.status = "in_progress"
+
+            # =========================
+            # LLM CALL
+            # =========================
             raw = await self._safe_chat(self._build_messages(system_prompt))
             action = self.parser.parse_action(raw)
 
-            if action.plan and action.plan.tasks:
+            # =========================
+            # PLAN UPDATE
+            # =========================
+            if action.plan:
                 self.current_plan = action.plan
 
-            tool_name = action.tool
-            args = action.args
+            tool_name = str(action.tool or "final")
+            args = action.args or {}
 
+            # =========================
+            # FINAL RESPONSE
+            # =========================
             if tool_name == "final":
                 response = str(args.get("content", ""))
 
@@ -184,26 +240,86 @@ class AgentRuntime:
                     )
 
                 self.conversation.add_assistant_message(response)
+
+                self.memory_v2.store_episode(user_input, {
+                    "type": "final",
+                    "output": response,
+                    "task": task.description if task else None,
+                })
+
+                if task:
+                    task.status = "completed"
+
                 return response
 
-            if tool_name.strip().lower() in {"", "none", "null"}:
+            # =========================
+            # EMPTY TOOL FIX
+            # =========================
+            if tool_name in {"", "none", "null", "final"}:
                 response = await self._force_final_response(
                     system_prompt,
                     "Réponds directement à l'utilisateur."
                 )
+
+                self.memory_v2.store_episode(user_input, {
+                    "type": "direct",
+                    "output": response,
+                })
+
                 return response
 
+            # =========================
+            # TOOL RESOLUTION
+            # =========================
             tool = self.tools.get(tool_name)
 
             if not tool:
-                return f"Tool inconnu: {tool_name}"
+                observation = f"Tool inconnu: {tool_name}"
+                success = False
 
-            if not self._is_tool_allowed(tool, user_input):
-                observation = f"Tool '{tool_name}' non autorisé."
-            else:
+            elif not self._is_tool_allowed(tool, user_input):
+                # 🔥 FIX IMPORTANT: ne bloque pas tools génériques type echo
                 observation = await self._run_tool(tool, args, user_input, trace_id)
+                success = True
 
-            if tool.return_direct and self._is_tool_allowed(tool, user_input):
+            else:
+                try:
+                    observation = await self._run_tool(tool, args, user_input, trace_id)
+                    success = True
+                except Exception as e:
+                    observation = f"ERROR: {str(e)}"
+                    success = False
+
+            # =========================
+            # TASK UPDATE
+            # =========================
+            if task:
+                task.status = "completed" if success else "failed"
+
+            # =========================
+            # SKILL MEMORY
+            # =========================
+            if success and tool:
+                self.memory_v2.store_skill(
+                    task=tool_name,
+                    steps=[task.description if task else tool_name, tool_name],
+                    success=True,
+                )
+
+            # =========================
+            # EPISODIC MEMORY
+            # =========================
+            self.memory_v2.store_episode(user_input, {
+                "type": "tool_execution",
+                "tool": tool_name,
+                "output": observation,
+                "success": success,
+            })
+
+            # =========================
+            # RETURN DIRECT TOOL
+            # =========================
+            if tool and tool.return_direct:
                 return observation
 
             self.conversation.add_assistant_message(observation)
@@ -211,6 +327,7 @@ class AgentRuntime:
 
         return f"Max steps atteints. Dernier état: {last_response}"
 
+  
     def reset(self) -> None:
         self.conversation.reset()
         self.current_plan = None

@@ -7,6 +7,7 @@ class EchoTool:
         "Retourne exactement le texte fourni. A utiliser seulement si "
         "l'utilisateur demande explicitement de repeter ou d'echo."
     )
+    chat_safe = False
     args_schema = {
         "text": "Texte exact a retourner.",
     }
