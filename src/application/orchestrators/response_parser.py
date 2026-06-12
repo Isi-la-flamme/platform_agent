@@ -93,19 +93,26 @@ class ResponseParser:
     def _sanitize_plan(self, parsed: dict[str, Any]) -> dict[str, Any]:
         plan = parsed.get("plan")
 
+        # ✅ CAS 0 : plan est une string → le convertir en dict
+        if isinstance(plan, str):
+            plan = {
+                "goal": plan,
+                "tasks": [{"description": plan, "status": "pending"}]
+            }
+            parsed["plan"] = plan
+
         if not isinstance(plan, dict):
             return parsed
 
         plan.pop("args", None)
 
         tasks = plan.get("tasks")
+
         if isinstance(tasks, list):
             for t in tasks:
                 if not isinstance(t, dict):
                     continue
-
                 status = str(t.get("status", "")).lower()
-
                 if status in {"done", "finished", "success"}:
                     t["status"] = "completed"
                 elif status in {"todo", "pending"}:
@@ -114,10 +121,31 @@ class ResponseParser:
                     t["status"] = "in_progress"
                 elif status in {"error", "failed"}:
                     t["status"] = "failed"
+            return parsed
 
-        return parsed
+        numeric_keys = sorted(
+            [k for k in plan.keys() if k.isdigit()],
+            key=int
+        )
+        if numeric_keys:
+            plan["tasks"] = [
+                {"description": str(plan[k]), "status": "pending"}
+                for k in numeric_keys
+            ]
+            if "goal" not in plan:
+                plan["goal"] = plan["tasks"][0]["description"]
+            for k in numeric_keys:
+                plan.pop(k, None)
+            return parsed
 
-    # ----------------------------
+        if not tasks:
+            plan["tasks"] = [
+                {"description": str(plan), "status": "pending"}
+            ]
+            if "goal" not in plan:
+                plan["goal"] = "Tâche en cours"
+
+        return parsed    # ----------------------------
     # JSON extraction (robust)
     # ----------------------------
     def _extract_json(self, raw: str) -> Any:

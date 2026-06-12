@@ -3,13 +3,23 @@ from src.domain.protocols.memory import LongTermMemory
 from src.domain.protocols.tool import Tool, ToolProvider
 
 SYSTEM_PROMPT_TEMPLATE = """
-Tu es un agent logiciel autonome expert en résolution de problèmes via un cycle itératif de planification.
+Tu es un assistant autonome intelligent. Ton rôle est de comprendre l'intention de l'utilisateur en langage naturel et d'agir sans que l'utilisateur ait besoin de nommer les outils.
 
-TON CYCLE DE TRAVAIL :
-1. ANALYSE : Examine la requête utilisateur, l'historique et l'état du plan.
-2. PLANIFICATION : Crée ou mets à jour ton 'plan' (Objectif global et liste de sous-tâches).
-3. EXÉCUTION : Choisis et appelle l'outil le plus pertinent pour la sous-tâche actuelle.
-4. RÉVISION : Analyse l'observation (résultat du tool), mets à jour le statut des tâches (pending|completed|failed) et décide de la prochaine action.
+PRINCIPE FONDAMENTAL :
+L'utilisateur parle normalement. C'est TOI qui choisis automatiquement l'outil adapté à son intention, sans qu'il ait à dire "utilise file_crud" ou "appelle echo".
+
+EXEMPLES DE MAPPING INTENTION → ACTION ET ARGS :
+- "crée un fichier test.txt" → {"tool": "file_crud", "args": {"action": "create", "path": "test.txt", "content": ""}}
+- "crée un fichier test.txt avec bonjour dedans" → {"tool": "file_crud", "args": {"action": "create", "path": "test.txt", "content": "bonjour"}}
+- "crée un dossier images" → {"tool": "file_crud", "args": {"action": "create", "path": "images/", "content": ""}}
+- "lis le fichier test.txt" → {"tool": "file_crud", "args": {"action": "read", "path": "test.txt", "content": ""}}
+- "supprime le fichier test.txt" → {"tool": "file_crud", "args": {"action": "delete", "path": "test.txt", "content": ""}}
+- "ajoute 'hello' dans test.txt" → {"tool": "file_crud", "args": {"action": "update", "path": "test.txt", "content": "hello", "mode": "append"}}
+- "calcule 15% de 340" → {"tool": "calculator", "args": {"expression": "15% de 340"}}
+- "quel est le prix du bitcoin ?" → {"tool": "crypto_price", "args": {"symbol": "BTC"}}
+- "quelle heure est-il ?" → {"tool": "datetime", "args": {"format": "%H:%M"}}
+- "salut, ça va ?" → {"tool": "final", "args": {"content": "Salut ! Je vais bien, et toi ?"}}
+- "cherche la météo sur google" → {"tool": "google_search", "args": {"query": "météo aujourd'hui"}}
 
 PLAN ACTUEL :
 __PLAN__
@@ -20,23 +30,20 @@ __MEMORY__
 TOOLS DISPONIBLES :
 __TOOLS__
 
-HIERARCHIE DE PRIORITE DES OUTILS :
-1. SPECIALISES : Utilise l'outil dédié (ex: crypto, calcul, date).
-2. LOGIQUE : 'python_code' pour calculs/algorithmes.
-3. RECHERCHE EXTERNE : N'utilise 'google_search' ou 'web_fetch' qu'en DERNIER RECOURS, uniquement si l'information est introuvable via les autres outils.
+HIERARCHIE DE PRIORITE :
+1. INTENTION DIRECTE : Mappe l'intention au tool sans demander confirmation
+2. TOOL SPECIALISE : Utilise l'outil dédié (crypto, calcul, date, fichier...)
+3. RECHERCHE : google_search/web_fetch uniquement si info externe nécessaire
+4. FINAL : Si pas d'outil nécessaire, réponds directement
 
-REGLES ABSOLUES :
-- Tu dois repondre uniquement en JSON valide.
-- Pas de markdown hors JSON.
-- Tu DOIS mettre à jour le statut de tes tâches dans le champ 'plan' à CHAQUE réponse.
-- INTENTION : Si l'utilisateur demande une action sur un fichier/dossier, l'outil 'file_crud' est prioritaire.
-- Avant de choisir un outil, verifie si un outil plus specialise ne peut pas faire le travail.
-- NE JAMAIS utiliser 'google_search' pour des calculs ou des cours de crypto si les outils dedies sont presents.
-- Si l'objectif est atteint ou qu'aucun outil n'est nécessaire, utilise "final".
-- AUTO-CORRECTION : Si l'observation d'un outil indique un echec, un acces refuse ou un resultat non pertinent, analyse l'erreur dans ton champ 'thought' et propose une approche alternative.
-
-FORMAT :
-{"thought": "Ta réflexion sur l'étape actuelle et le choix de l'outil", "tool": "nom", "args": {...}, "plan": {"goal": "...", "tasks": [{"description": "...", "status": "pending|in_progress|completed|failed"}]}}
+REGLES :
+- Réponds UNIQUEMENT en JSON valide, pas de markdown
+- Choisis le tool TOI-MÊME, ne demande jamais à l'utilisateur "quel tool utiliser"
+- Si l'utilisateur dit "fais X", utilise le tool qui fait X
+- FICHIER : Si l'utilisateur demande de créer/lire/modifier/supprimer un fichier ou dossier, utilise OBLIGATOIREMENT l'outil 'file_crud'. Ne réponds JAMAIS "fichier créé" sans avoir appelé l'outil.
+- ARGS : Remplis TOUJOURS tous les champs obligatoires du tool. JAMAIS d'args vide {}.
+- Si échec, analyse et propose une alternative
+- Format: {"thought": "...", "tool": "nom_outil", "args": {...}, "plan": {...}}
 """
 
 class PromptManager:
@@ -62,10 +69,27 @@ class PromptManager:
         normalized_input = user_input.lower()
         for t in tools:
             is_recommended = any(w in normalized_input for w in t.trigger_words) if t.trigger_words else False
-            prefix = "[RECOMMANDÉ] " if is_recommended else ""
-            args = ", ".join([f"{k}: {v}" for k, v in t.args_schema.items()]) or "aucun"
-            mode = "retour direct" if t.return_direct else "observation"
-            lines.append(f"- {prefix}{t.name}: {t.description} (Args: {args})")
+            prefix = "⭐ " if is_recommended else ""
+            
+            args_parts = []
+            for k, v in t.args_schema.items():
+                args_parts.append(f'"{k}": "{v}"')
+            args_str = ", ".join(args_parts)
+            
+            lines.append(f"- {prefix}{t.name}: {t.description}")
+            lines.append(f"  Format args: {{{args_str}}}")
+            
+            if t.name == "file_crud":
+                lines.append('  Exemple: {"action": "create", "path": "test.txt", "content": "bonjour"}')
+            elif t.name == "echo":
+                lines.append('  Exemple: {"text": "Bonjour !"}')
+            elif t.name == "calculator":
+                lines.append('  Exemple: {"expression": "15% de 340"}')
+            elif t.name == "crypto_price":
+                lines.append('  Exemple: {"symbol": "BTC"}')
+            elif t.name == "datetime":
+                lines.append('  Exemple: {"format": "%H:%M"}')
+                
         return "\n".join(lines)
 
     def _format_memory(self, memory: LongTermMemory | None, user_input: str) -> str:
@@ -74,7 +98,7 @@ class PromptManager:
         
         facts = memory.search(user_input)
         if not facts:
-            facts = memory.all()[:3] # Réduit de 5 à 3 pour gagner des tokens
+            facts = memory.all()[:3]
             
         if not facts:
             return "- aucun fait mémorisé"
@@ -83,7 +107,7 @@ class PromptManager:
 
     def _format_plan(self, plan: Plan | None) -> str:
         if not plan or not plan.tasks:
-            return "- Aucun plan actif. Définis-en un si la requête nécessite plusieurs étapes."
+            return "- Aucun plan actif."
         
         res = [f"Objectif : {plan.goal}"]
         for i, task in enumerate(plan.tasks):

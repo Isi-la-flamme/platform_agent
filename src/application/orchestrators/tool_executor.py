@@ -70,18 +70,23 @@ class ToolExecutor:
             if hasattr(tool, "infer_args"):
                 args = tool.infer_args(user_input, args)
 
-            # Validation stricte des arguments par rapport au schéma de l'outil
+                        # Validation des arguments par rapport au schéma de l'outil
+            optional_args = set(getattr(tool, "optional_args", ()))
+
             for arg_name in args.keys():
                 if arg_name not in tool.args_schema:
                     raise ToolExecutionError(f"Argument '{arg_name}' invalide pour l'outil '{tool_name}'.")
             
-            optional_args = getattr(tool, "optional_args", ())
-            for req_arg in tool.args_schema.keys():
-                if req_arg in optional_args or args.get(req_arg) is not None:
+            for req_arg, _ in tool.args_schema.items():
+                # ✅ Skip les args optionnels
+                if req_arg in optional_args:
                     continue
-                if req_arg not in args:
-                    raise ToolExecutionError(f"Argument manquant '{req_arg}' pour l'outil '{tool_name}'.")
-
+                # ✅ Vérifie que l'arg requis est présent et non vide
+                if req_arg not in args or args[req_arg] is None:
+                    raise ToolExecutionError(
+                        f"Argument manquant '{req_arg}' pour l'outil '{tool_name}'. "
+                        f"Args requis: {[k for k in tool.args_schema if k not in optional_args]}"
+                    )
             # 3. Exécution avec Retries, Timeout et Isolation
             # On configure tenacity pour ne pas réessayer si c'est une ToolExecutionError (erreur logique/validation)
             retrier = AsyncRetrying(

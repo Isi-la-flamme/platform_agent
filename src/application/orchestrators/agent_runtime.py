@@ -271,6 +271,39 @@ class AgentRuntime:
             action = self.parser.parse_action(raw)
 
             # =========================
+            # ✅ ANTI-ARGS-VIDE : correction automatique
+            # =========================
+            if action.tool and action.tool != "final" and (not action.args or action.args == {}):
+                self.logger.warning(
+                    f"Args vides détectés pour tool '{action.tool}'. "
+                    f"Demande de correction au LLM."
+                )
+                # ✅ Récupérer les infos du tool
+                tool_info = ""
+                tool = self.tools.get(action.tool)
+                if tool:
+                    args_schema = ", ".join(
+                        f'"{k}": "{v}"' for k, v in tool.args_schema.items()
+                    )
+                    tool_info = (
+                        f"L'outil à utiliser est OBLIGATOIREMENT '{action.tool}'. "
+                        f"Format requis : {{\"tool\":\"{action.tool}\", "
+                        f"\"args\":{{{args_schema}}}, "
+                        f"\"plan\":{{\"goal\":\"...\", \"tasks\":[{{\"description\":\"...\", \"status\":\"pending\"}}]}}}}"
+                    )
+                
+                correction_prompt = (
+                    f"Tu as choisi l'outil '{action.tool}' mais avec des args vides. "
+                    f"Corrige UNIQUEMENT les args, ne change PAS d'outil.\n\n"
+                    f"{tool_info}\n\n"
+                    f"Requête utilisateur : \"{user_input}\"\n\n"
+                    f"Réponds UNIQUEMENT en JSON correct."
+                )
+                                # Si toujours vide après correction → final propre
+                if action.tool != "final" and (not action.args or action.args == {}):
+                    self.logger.error(f"Échec correction args pour '{action.tool}', fallback final")
+                    action.tool = "final"
+                    action.args = {"content": f"Je n'ai pas réussi à utiliser {action.tool}. Peux-tu reformuler ta demande ?"}            # =========================
             # PLAN UPDATE
             # =========================
             if action.plan:
@@ -323,27 +356,42 @@ class AgentRuntime:
                 return response
 
             # =========================
+            # =========================
             # TOOL RESOLUTION
             # =========================
             tool = self.tools.get(tool_name)
 
             if not tool:
-                observation = f"Tool inconnu: {tool_name}"
-                success = False
+                self.logger.warning(
+                    f"Tool inconnu: '{tool_name}'. "
+                    f"Tools disponibles: {[t.name for t in self.tools.list_tools()]}"
+                )
+                # ✅ Forcer une réponse finale expliquant le problème
+                observation = await self._force_final_response(
+                    system_prompt,
+                    f"L'outil '{tool_name}' n'existe pas. Utilise UNIQUEMENT les outils disponibles "
+                    f"({', '.join(t.name for t in self.tools.list_tools())}) "
+                    f"pour répondre à : {user_input}"
+                )
+                self.conversation.add_assistant_message(observation)
+                return observation
 
             elif not self._is_tool_allowed(tool, user_input):
-                # 🔥 FIX IMPORTANT: ne bloque pas tools génériques type echo
-                observation = await self._run_tool(tool, args, user_input, trace_id)
-                success = True
+                # Tool non autorisé → on force une réponse finale
+                observation = await self._force_final_response(
+                    system_prompt,
+                    f"Réponds à: {user_input}"
+                )
+                success = False
 
             else:
+                # Tool autorisé → exécution
                 try:
                     observation = await self._run_tool(tool, args, user_input, trace_id)
                     success = True
                 except Exception as e:
                     observation = f"ERROR: {str(e)}"
                     success = False
-
             # =========================
             # TASK UPDATE
             # =========================
