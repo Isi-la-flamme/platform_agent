@@ -78,7 +78,7 @@ class AgentRuntime:
             return True
         
         if tool.name == "echo" and not tool.chat_safe:
-            return  self.force_final_response(...)
+            return  False
 
         return False
 
@@ -113,22 +113,40 @@ class AgentRuntime:
         )
 
 
-        async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
-            """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
-            fact_patterns = [
-                "est un", "est une", "signifie", "se trouve", "capitale",
-                "président", "date de", "créé en", "fondé en", "inventé par"
-            ]
-            
-            for pattern in fact_patterns:
-                if pattern in response.lower():
-                    sentences = response.replace("!", ".").replace("?", ".").split(".")
-                    for sentence in sentences:
-                        if pattern in sentence.lower():
-                            fact = sentence.strip()
-                            if len(fact) > 10 and len(fact) < 300:
-                                self.memory_v2.store_fact(fact, importance=0.6)
-                                self.logger.debug(f"Fait appris: {fact}")
+    async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
+        """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
+        fact_patterns = [
+            "est un", "est une", "signifie", "se trouve", "capitale",
+            "président", "date de", "créé en", "fondé en", "inventé par"
+        ]
+        
+        for pattern in fact_patterns:
+            if pattern in response.lower():
+                sentences = response.replace("!", ".").replace("?", ".").split(".")
+                for sentence in sentences:
+                    if pattern in sentence.lower():
+                        fact = sentence.strip()
+                        if 10 < len(fact) < 300:
+                            self.memory_v2.store_fact(fact, importance=0.6)
+                            self.logger.debug(f"Fait appris: {fact}")
+
+
+    async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
+        """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
+        fact_patterns = [
+            "est un", "est une", "signifie", "se trouve", "capitale",
+            "président", "date de", "créé en", "fondé en", "inventé par"
+        ]
+        
+        for pattern in fact_patterns:
+            if pattern in response.lower():
+                sentences = response.replace("!", ".").replace("?", ".").split(".")
+                for sentence in sentences:
+                    if pattern in sentence.lower():
+                        fact = sentence.strip()
+                        if len(fact) > 10 and len(fact) < 300:
+                            self.memory_v2.store_fact(fact, importance=0.6)
+                            self.logger.debug(f"Fait appris: {fact}")
 
 
     def _answer_tools_list_if_requested(self, user_input: str) -> str | None:

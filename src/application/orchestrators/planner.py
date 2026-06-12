@@ -67,16 +67,23 @@ Retourne UNIQUEMENT un JSON valide :
 
         tasks: list[Task] = []
 
+        # planner.py - dans la boucle for t in parsed.get("tasks", []):
+
         for t in parsed.get("tasks", []):
+            depends = t.get("depends_on", [])
+            # ✅ Filtrer les valeurs non-string
+            if isinstance(depends, list):
+                depends = [str(d) for d in depends if d is not None]
+            else:
+                depends = []
 
             tasks.append(
                 Task(
                     description=t.get("description", ""),
-                    depends_on=t.get("depends_on", []),
+                    depends_on=depends,
                     status="pending",
                 )
             )
-
         if not tasks:
             tasks.append(
                 Task(

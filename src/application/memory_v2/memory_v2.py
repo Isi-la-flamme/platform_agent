@@ -2,11 +2,13 @@
 
 from typing import Any
 import json
+from datetime import datetime
 
 from .episodic_store import EpisodicMemory
 from .semantic_store import SemanticMemory
 from .procedural_store import ProceduralMemory
 from .retriever import MemoryRetriever
+from .models import MemoryItem, new_id
 from src.infrastructure.memory.chroma_memory_store import ChromaMemoryStore
 
 
@@ -43,33 +45,27 @@ class MemoryV2:
             except Exception:
                 output = str(output)
 
-        # Persistant
         self.episodic_store.remember(
             key=user_input,
             value=output,
             text=f"Q:{user_input} | A:{output}"
         )
-        # Cache rapide
         self.episodic.add(user_input, output)
 
     def store_fact(self, fact: str, importance: float = 0.5) -> None:
-        # Persistant
         self.semantic_store.remember(
             key=fact,
             value=str(importance),
             text=fact
         )
-        # Cache rapide
         self.semantic.add_fact(fact, importance)
 
     def store_skill(self, task: str, steps: list[str], success: bool) -> None:
-        # Persistant
         self.procedural_store.remember(
             key=task,
             value=json.dumps({"steps": steps, "success": success}),
             text=f"Tâche: {task} | Étapes: {', '.join(steps)}"
         )
-        # Cache rapide
         self.procedural.add_pattern(task, steps, success)
 
     # =========================
@@ -77,20 +73,22 @@ class MemoryV2:
     # =========================
 
     def retrieve(self, query: str):
-        # Chercher dans ChromaDB (vectoriel)
         episodic_results = self.episodic_store.search(query, limit=10)
         semantic_results = self.semantic_store.search(query, limit=10)
         procedural_results = self.procedural_store.search(query, limit=10)
 
-        # Fallback sur le cache in-memory
-        if not episodic_results:
-            episodic_results = self.episodic.recent(20)
-        if not semantic_results:
-            semantic_results = self.semantic.all()
-        if not procedural_results:
-            procedural_results = self.procedural.all()
+        episodic_items = self._facts_to_items(episodic_results)
+        semantic_items = self._facts_to_items(semantic_results)
+        procedural_items = self._facts_to_items(procedural_results)
 
-        pool = episodic_results + semantic_results + procedural_results
+        if not episodic_items:
+            episodic_items = self.episodic.recent(20)
+        if not semantic_items:
+            semantic_items = self.semantic.all()
+        if not procedural_items:
+            procedural_items = self.procedural.all()
+
+        pool = episodic_items + semantic_items + procedural_items
         return self.retriever.retrieve(pool, query)
 
     # =========================
@@ -98,20 +96,36 @@ class MemoryV2:
     # =========================
 
     def retrieve_skills(self, query: str):
-        # Essayer ChromaDB d'abord
         chroma_results = self.procedural_store.search(query, limit=10)
         if chroma_results:
-            return chroma_results
+            return self._facts_to_items(chroma_results)
         return self.procedural.search(query)
 
     def retrieve_facts(self, query: str):
-        # Essayer ChromaDB d'abord
         chroma_results = self.semantic_store.search(query, limit=10)
         if chroma_results:
-            return chroma_results
+            return self._facts_to_items(chroma_results)
         return self.semantic.search(query)
 
     def clear(self):
         self.episodic.clear()
         self.semantic.clear()
         self.procedural.clear()
+
+    def _facts_to_items(self, facts: list) -> list:
+        """Convertit une liste de MemoryFact en MemoryItem."""
+        items = []
+        for f in facts:
+            if hasattr(f, 'content'):
+                items.append(f)
+            else:
+                items.append(MemoryItem(
+                    id=new_id(),
+                    content=getattr(f, 'text', str(f)),
+                    metadata={
+                        "key": getattr(f, 'key', ''),
+                        "value": getattr(f, 'value', '')
+                    },
+                    timestamp=datetime.utcnow(),
+                ))
+        return items
