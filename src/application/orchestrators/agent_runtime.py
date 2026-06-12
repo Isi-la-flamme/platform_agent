@@ -112,6 +112,25 @@ class AgentRuntime:
             or normalized.startswith('{"goal"')
         )
 
+
+        async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
+            """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
+            fact_patterns = [
+                "est un", "est une", "signifie", "se trouve", "capitale",
+                "président", "date de", "créé en", "fondé en", "inventé par"
+            ]
+            
+            for pattern in fact_patterns:
+                if pattern in response.lower():
+                    sentences = response.replace("!", ".").replace("?", ".").split(".")
+                    for sentence in sentences:
+                        if pattern in sentence.lower():
+                            fact = sentence.strip()
+                            if len(fact) > 10 and len(fact) < 300:
+                                self.memory_v2.store_fact(fact, importance=0.6)
+                                self.logger.debug(f"Fait appris: {fact}")
+
+
     def _answer_tools_list_if_requested(self, user_input: str) -> str | None:
         normalized = user_input.lower()
 
@@ -241,6 +260,9 @@ class AgentRuntime:
 
                 self.conversation.add_assistant_message(response)
 
+                # ✅ Apprendre des faits de la réponse
+                await self._learn_facts_from_response(user_input, response)
+
                 self.memory_v2.store_episode(user_input, {
                     "type": "final",
                     "output": response,
@@ -251,7 +273,6 @@ class AgentRuntime:
                     task.status = "completed"
 
                 return response
-
             # =========================
             # EMPTY TOOL FIX
             # =========================
