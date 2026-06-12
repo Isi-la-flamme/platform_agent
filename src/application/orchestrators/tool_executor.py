@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import time
 from typing import Any
+from collections import defaultdict
 
 from tenacity import (
     AsyncRetrying,
@@ -34,6 +35,27 @@ class ToolExecutor:
         self.max_retries = max_retries
         self.allowed_tools = allowed_tools
         self.event_bus = event_bus
+        self._call_times: dict[str, list[float]] = defaultdict(list)
+        self._max_calls_per_minute = 30
+        self._rate_limit_window = 60.0  # secondes
+
+
+    def _check_rate_limit(self, tool_name: str) -> None:
+        """Vérifie que le tool n'est pas appelé trop souvent."""
+        now = time.time()
+        # Nettoyer les vieux appels
+        self._call_times[tool_name] = [
+            t for t in self._call_times[tool_name]
+            if now - t < self._rate_limit_window
+        ]
+        
+        if len(self._call_times[tool_name]) >= self._max_calls_per_minute:
+            raise ToolExecutionError(
+                f"Rate limit atteint pour '{tool_name}' "
+                f"({self._max_calls_per_minute} appels/min max). Attendez un peu."
+            )
+        
+        self._call_times[tool_name].append(now)
 
     async def execute(
         self, 
@@ -46,6 +68,8 @@ class ToolExecutor:
         if self.allowed_tools is not None and tool_name not in self.allowed_tools:
             self.logger.warning(f"Tentative d'accès refusée : tool={tool_name}")
             raise ToolExecutionError(f"Permission refusée pour l'outil '{tool_name}'.")
+        
+        self._check_rate_limit(tool_name)
 
         tool = self.tools.get(tool_name)
         if not tool:
@@ -140,8 +164,10 @@ class ToolExecutor:
                 return asyncio.run(tool.execute(**args))
             return tool.execute(**args)
 
+        tool_timeout = getattr(tool, "timeout", self.default_timeout)
+
         # asyncio.to_thread utilise le pool de threads par défaut pour ne pas bloquer la boucle principale
         return await asyncio.wait_for(
             asyncio.to_thread(wrapper),
-            timeout=self.default_timeout
+            timeout=tool_timeout
         )
