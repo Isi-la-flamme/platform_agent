@@ -37,6 +37,7 @@ class FileCrudTool:
         "repertoire",
     )
 
+
     _blocked_parts = {
         ".git",
         ".venv",
@@ -47,6 +48,12 @@ class FileCrudTool:
     }
     _blocked_names = {
         ".env",
+    }
+    # ✅ AJOUT
+    _blocked_extensions = {
+        ".exe", ".dll", ".so", ".dylib", ".sh", ".bash", ".bat", ".cmd",
+        ".ps1", ".vbs", ".reg", ".msi", ".apk", ".app", ".bin", ".run",
+        ".cpl", ".scr", ".jar", ".pyc", ".pyo",
     }
     _max_read_bytes = 100_000
     _max_output_chars = 4_000
@@ -113,9 +120,12 @@ class FileCrudTool:
             raise ValueError("Chemin refuse: dossier protege.")
         if resolved.name in self._blocked_names:
             raise ValueError("Chemin refuse: fichier protege.")
+        # ✅ AJOUT
+        if resolved.suffix.lower() in self._blocked_extensions:
+            raise ValueError(f"Chemin refuse: extension bloquée '{resolved.suffix}'.")
 
         return resolved
-
+    
     def _create(self, path: Path, content: str) -> str:
         if path.exists():
             return f"Creation refusee: {self._relative(path)} existe deja."
