@@ -43,7 +43,6 @@ class AgentRuntime:
         self.logger = logger
         self.tools = tools
         self.event_bus = event_bus
-        
 
         # Core modules
         self.conversation = ConversationManager(self.MAX_MESSAGES)
@@ -53,11 +52,16 @@ class AgentRuntime:
         self.memory_v2 = MemoryV2()
         self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
 
-        # 🧠 FIX IMPORTANT : composants manquants ajoutés
         self.scheduler = Scheduler()
         self.planner = Planner(self.llm, self.parser)
 
         self.current_plan: Plan | None = None
+        self._last_responses: list[str] = []
+        self._loop_count: int = 0
+
+    # ============================================================
+    # BUILD / TOOL ALLOWED
+    # ============================================================
 
     def _build_messages(self, system_prompt: str) -> list[dict[str, str]]:
         return [
@@ -76,11 +80,15 @@ class AgentRuntime:
 
         if tool.name == "file_crud" and re.search(r'\.[a-z0-9]{1,5}\b', normalized):
             return True
-        
+
         if tool.name == "echo" and not tool.chat_safe:
-            return  False
+            return False
 
         return False
+
+    # ============================================================
+    # LLM CALLS
+    # ============================================================
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
     async def _safe_chat(self, messages: list[dict[str, str]]) -> str:
@@ -104,18 +112,15 @@ class AgentRuntime:
         action = self.parser.parse_action(raw)
 
         content = str(action.args.get("content", "")).strip()
-        
-        # Si le LLM répond du texte brut au lieu de JSON
+
         if not content or content in {"...", "null", "none"}:
             content = raw.strip()
-            # Nettoyer le markdown éventuel
             for prefix in ["```json", "```", "JSON:", "Réponse:"]:
                 content = content.removeprefix(prefix).strip()
-        
-        # Fallback ultime
+
         if not content or len(content) < 2:
             content = instruction or "Je suis là !"
-            
+
         return content
 
     def _needs_final_retry(self, response: str) -> bool:
@@ -125,8 +130,12 @@ class AgentRuntime:
             normalized in {"", "final", "json", "none", "null", "plan", "tool", "réponse directe.", "réponse directe"}
             or normalized.startswith("plan actuel")
             or normalized.startswith('{"goal"')
-            or len(normalized) < 3  # ✅ Évite les réponses vides ou trop courtes
+            or len(normalized) < 3
         )
+
+    # ============================================================
+    # LEARNING
+    # ============================================================
 
     async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
         """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
@@ -134,7 +143,7 @@ class AgentRuntime:
             "est un", "est une", "signifie", "se trouve", "capitale",
             "président", "date de", "créé en", "fondé en", "inventé par"
         ]
-        
+
         for pattern in fact_patterns:
             if pattern in response.lower():
                 sentences = response.replace("!", ".").replace("?", ".").split(".")
@@ -145,24 +154,71 @@ class AgentRuntime:
                             self.memory_v2.store_fact(fact, importance=0.6)
                             self.logger.debug(f"Fait appris: {fact}")
 
+    # ============================================================
+    # LOOP DETECTION
+    # ============================================================
 
-    async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
-        """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
-        fact_patterns = [
-            "est un", "est une", "signifie", "se trouve", "capitale",
-            "président", "date de", "créé en", "fondé en", "inventé par"
+    def _is_loop_detected(self, response: str, user_input: str) -> bool:
+        """Détecte si le LLM tourne en boucle sur une réponse inutile."""
+        if self._last_responses and response.strip() == self._last_responses[-1].strip():
+            self._loop_count += 1
+        else:
+            self._loop_count = 0
+
+        self._last_responses.append(response)
+        if len(self._last_responses) > 5:
+            self._last_responses = self._last_responses[-5:]
+
+        if self._loop_count >= 2:
+            self.logger.warning(f"Boucle détectée: réponse répétée {self._loop_count}x")
+            return True
+
+        return False
+
+    def _has_action_intent(self, user_input: str) -> bool:
+        """Détecte si l'utilisateur demande une action."""
+        action_keywords = [
+            "créer", "crée", "cree", "creer", "supprimer", "supprime",
+            "effacer", "efface", "modifier", "modifie", "ajouter", "ajoute",
+            "écrire", "ecrire", "lis", "lire", "lit", "déplacer", "copier",
+            "calcule", "cherche", "recherche"
         ]
-        
-        for pattern in fact_patterns:
-            if pattern in response.lower():
-                sentences = response.replace("!", ".").replace("?", ".").split(".")
-                for sentence in sentences:
-                    if pattern in sentence.lower():
-                        fact = sentence.strip()
-                        if len(fact) > 10 and len(fact) < 300:
-                            self.memory_v2.store_fact(fact, importance=0.6)
-                            self.logger.debug(f"Fait appris: {fact}")
+        ui = user_input.lower()
+        return any(kw in ui for kw in action_keywords)
 
+    def _get_forced_tool_for_intent(self, user_input: str) -> tuple[str, dict]:
+        """Retourne le tool et les args forcés selon l'intention détectée."""
+        ui = user_input.lower()
+
+        file_keywords = ["fichier", "file", "dossier", "folder", "répertoire", "repertoire",
+                         "créer", "crée", "cree", "creer", "supprimer", "supprime",
+                         "effacer", "efface", "lis", "lire", "lit", "modifier", "modifie",
+                         "écrire", "ecrire", "ajouter", "ajoute"]
+        if any(kw in ui for kw in file_keywords):
+            return ("file_crud", {"action": "create", "path": "", "content": ""})
+
+        calc_keywords = ["calcule", "calcul", "combien fait", "additionne", "multiplie",
+                         "divise", "soustrait", "pourcentage"]
+        if any(kw in ui for kw in calc_keywords):
+            return ("calculator", {"expression": user_input})
+
+        crypto_keywords = ["bitcoin", "ethereum", "crypto", "prix", "cours", "btc", "eth"]
+        if any(kw in ui for kw in crypto_keywords):
+            return ("crypto_price", {"symbol": "BTC"})
+
+        time_keywords = ["heure", "date", "aujourd'hui", "demain", "quel jour"]
+        if any(kw in ui for kw in time_keywords):
+            return ("datetime", {"format": "%H:%M"})
+
+        search_keywords = ["cherche", "recherche", "google", "internet", "web"]
+        if any(kw in ui for kw in search_keywords):
+            return ("google_search", {"query": user_input})
+
+        return ("final", {"content": f"Action demandée: {user_input}"})
+
+    # ============================================================
+    # HELPERS
+    # ============================================================
 
     def _answer_tools_list_if_requested(self, user_input: str) -> str | None:
         normalized = user_input.lower()
@@ -184,6 +240,9 @@ class AgentRuntime:
                 await self.event_bus.emit("agent.error", {"trace_id": trace_id, "error": msg})
             return msg
 
+    # ============================================================
+    # MAIN RUN
+    # ============================================================
 
     async def run(self, user_input: str, max_steps: int = 10) -> str:
         trace_id = str(uuid.uuid4())
@@ -196,33 +255,24 @@ class AgentRuntime:
                 {"trace_id": trace_id, "user_input": user_input},
             )
 
-        # =========================
         # MEMORY WRITE (INPUT)
-        # =========================
         self.memory_v2.store_episode(user_input, {"type": "input"})
-
         self.conversation.add_user_message(user_input)
         self.memory_manager.learn_facts(user_input)
 
-        # =========================
         # TOOL SHORTCUT
-        # =========================
         tools_response = self._answer_tools_list_if_requested(user_input)
         if tools_response:
             self.memory_v2.store_episode(user_input, {"type": "tool_list", "output": tools_response})
             return tools_response
 
-        # =========================
         # MEMORY SHORTCUT
-        # =========================
         memory_response = self.memory_manager.answer_from_memory(user_input)
         if memory_response:
             self.memory_v2.store_episode(user_input, {"type": "memory_hit", "output": memory_response})
             return memory_response
 
-        # =========================
-        # PLAN INIT (FIX IMPORTANT)
-        # =========================
+        # PLAN INIT
         if self.current_plan is None or len(getattr(self.current_plan, "tasks", [])) == 0:
             self.current_plan = await self.planner.create_plan(user_input)
 
@@ -230,25 +280,18 @@ class AgentRuntime:
 
         for _ in range(max_steps):
 
-            # =========================
             # TASK PICK
-            # =========================
             task = self.scheduler.get_next_task(self.current_plan) if self.current_plan else None
             task_query = task.description if task else user_input
 
-            # =========================
-            # MEMORY RETRIEVAL (SAFE)
-            # =========================
+            # MEMORY RETRIEVAL
             retrieved = self.memory_v2.retrieve(task_query)
-
             memory_context = "\n".join(
                 f"- {getattr(m, 'content', str(m))}"
                 for m in retrieved[:5]
             )
 
-            # =========================
             # PROMPT BUILD
-            # =========================
             system_prompt = self.prompter.build_system_prompt(
                 self.tools,
                 self.memory_manager.memory,
@@ -264,48 +307,58 @@ class AgentRuntime:
                 if task.status == "pending":
                     task.status = "in_progress"
 
-            # =========================
             # LLM CALL
-            # =========================
             raw = await self._safe_chat(self._build_messages(system_prompt))
             action = self.parser.parse_action(raw)
 
             # =========================
-            # ✅ ANTI-ARGS-VIDE : correction automatique
+            # ANTI-ARGS-VIDE
             # =========================
             if action.tool and action.tool != "final" and (not action.args or action.args == {}):
-                self.logger.warning(
-                    f"Args vides détectés pour tool '{action.tool}'. "
-                    f"Demande de correction au LLM."
-                )
-                # ✅ Récupérer les infos du tool
+                self.logger.warning(f"Args vides pour '{action.tool}'. Correction...")
                 tool_info = ""
-                tool = self.tools.get(action.tool)
-                if tool:
-                    args_schema = ", ".join(
-                        f'"{k}": "{v}"' for k, v in tool.args_schema.items()
-                    )
+                tool_ref = self.tools.get(action.tool)
+                if tool_ref:
+                    args_schema = ", ".join(f'"{k}": "{v}"' for k, v in tool_ref.args_schema.items())
                     tool_info = (
                         f"L'outil à utiliser est OBLIGATOIREMENT '{action.tool}'. "
                         f"Format requis : {{\"tool\":\"{action.tool}\", "
                         f"\"args\":{{{args_schema}}}, "
                         f"\"plan\":{{\"goal\":\"...\", \"tasks\":[{{\"description\":\"...\", \"status\":\"pending\"}}]}}}}"
                     )
-                
+
                 correction_prompt = (
-                    f"Tu as choisi l'outil '{action.tool}' mais avec des args vides. "
+                    f"Tu as choisi l'outil '{action.tool}' mais avec des args vides.\n"
                     f"Corrige UNIQUEMENT les args, ne change PAS d'outil.\n\n"
                     f"{tool_info}\n\n"
                     f"Requête utilisateur : \"{user_input}\"\n\n"
                     f"Réponds UNIQUEMENT en JSON correct."
                 )
-                                # Si toujours vide après correction → final propre
+                try:
+                    raw = await self._safe_chat([
+                        {"role": "system", "content": correction_prompt},
+                    ])
+                    action = self.parser.parse_action(raw)
+                except Exception:
+                    pass
+
                 if action.tool != "final" and (not action.args or action.args == {}):
                     self.logger.error(f"Échec correction args pour '{action.tool}', fallback final")
                     action.tool = "final"
-                    action.args = {"content": f"Je n'ai pas réussi à utiliser {action.tool}. Peux-tu reformuler ta demande ?"}            # =========================
-            # PLAN UPDATE
+                    action.args = {"content": f"Je n'ai pas réussi à utiliser {action.tool}. Peux-tu reformuler ?"}
+
             # =========================
+            # DÉTECTEUR DE BOUCLE
+            # =========================
+            if action.tool == "final":
+                response_text = str(action.args.get("content", ""))
+                if self._is_loop_detected(response_text, user_input) and self._has_action_intent(user_input):
+                    forced_tool, forced_args = self._get_forced_tool_for_intent(user_input)
+                    self.logger.warning(f"Boucle détectée → force '{forced_tool}'")
+                    action.tool = forced_tool
+                    action.args = forced_args
+
+            # PLAN UPDATE
             if action.plan:
                 self.current_plan = action.plan
 
@@ -326,7 +379,6 @@ class AgentRuntime:
 
                 self.conversation.add_assistant_message(response)
 
-                # ✅ Apprendre des faits de la réponse
                 await self._learn_facts_from_response(user_input, response)
 
                 self.memory_v2.store_episode(user_input, {
@@ -339,23 +391,21 @@ class AgentRuntime:
                     task.status = "completed"
 
                 return response
+
             # =========================
             # EMPTY TOOL FIX
             # =========================
-            if tool_name in {"", "none", "null", "final"}:
+            if tool_name in {"", "none", "null"}:
                 response = await self._force_final_response(
                     system_prompt,
                     "Réponds directement à l'utilisateur."
                 )
-
                 self.memory_v2.store_episode(user_input, {
                     "type": "direct",
                     "output": response,
                 })
-
                 return response
 
-            # =========================
             # =========================
             # TOOL RESOLUTION
             # =========================
@@ -364,9 +414,8 @@ class AgentRuntime:
             if not tool:
                 self.logger.warning(
                     f"Tool inconnu: '{tool_name}'. "
-                    f"Tools disponibles: {[t.name for t in self.tools.list_tools()]}"
+                    f"Disponibles: {[t.name for t in self.tools.list_tools()]}"
                 )
-                # ✅ Forcer une réponse finale expliquant le problème
                 observation = await self._force_final_response(
                     system_prompt,
                     f"L'outil '{tool_name}' n'existe pas. Utilise UNIQUEMENT les outils disponibles "
@@ -377,7 +426,6 @@ class AgentRuntime:
                 return observation
 
             elif not self._is_tool_allowed(tool, user_input):
-                # Tool non autorisé → on force une réponse finale
                 observation = await self._force_final_response(
                     system_prompt,
                     f"Réponds à: {user_input}"
@@ -385,22 +433,18 @@ class AgentRuntime:
                 success = False
 
             else:
-                # Tool autorisé → exécution
                 try:
                     observation = await self._run_tool(tool, args, user_input, trace_id)
                     success = True
                 except Exception as e:
                     observation = f"ERROR: {str(e)}"
                     success = False
-            # =========================
+
             # TASK UPDATE
-            # =========================
             if task:
                 task.status = "completed" if success else "failed"
 
-            # =========================
             # SKILL MEMORY
-            # =========================
             if success and tool:
                 self.memory_v2.store_skill(
                     task=tool_name,
@@ -408,9 +452,7 @@ class AgentRuntime:
                     success=True,
                 )
 
-            # =========================
             # EPISODIC MEMORY
-            # =========================
             self.memory_v2.store_episode(user_input, {
                 "type": "tool_execution",
                 "tool": tool_name,
@@ -418,9 +460,7 @@ class AgentRuntime:
                 "success": success,
             })
 
-            # =========================
             # RETURN DIRECT TOOL
-            # =========================
             if tool and tool.return_direct:
                 return observation
 
@@ -429,8 +469,13 @@ class AgentRuntime:
 
         return f"Max steps atteints. Dernier état: {last_response}"
 
-  
+    # ============================================================
+    # RESET
+    # ============================================================
+
     def reset(self) -> None:
         self.conversation.reset()
         self.current_plan = None
+        self._last_responses = []
+        self._loop_count = 0
         self.logger.info("Agent reset")

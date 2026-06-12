@@ -1,0 +1,1 @@
+# Projet Chatbot\n\nChatbot francophone créé à l'aide d'intelligence artificielle pour faciliter les échanges d'information et de connaissances.\n\ndéveloppé avec amour et soin.\n\nMerci de créer un projet !
