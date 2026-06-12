@@ -13,6 +13,7 @@ else:
 
 
 class PythonCodeTool:
+    timeout = 10 
     name = "python_code"
     description = (
         "Execute du code Python isole. Utile pour les calculs complexes, "
