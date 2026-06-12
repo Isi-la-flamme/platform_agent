@@ -1,4 +1,5 @@
 # semantic_store.py
+
 from .models import MemoryItem, new_id
 from datetime import datetime
 
@@ -20,3 +21,26 @@ class SemanticMemory:
 
     def all(self):
         return self.store
+
+    def search(self, query: str, limit: int = 5) -> list[MemoryItem]:
+        """Recherche par mot-clé dans les faits stockés."""
+        q = query.lower()
+        scored: list[tuple[float, MemoryItem]] = []
+
+        for item in self.store:
+            score = 0.0
+            if q in item.content.lower():
+                score = 1.0
+            else:
+                # matching partiel par mots
+                query_terms = set(q.split())
+                content_terms = set(item.content.lower().split())
+                overlap = query_terms & content_terms
+                if overlap:
+                    score = len(overlap) / len(query_terms)
+
+            if score > 0:
+                scored.append((score * item.importance, item))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
