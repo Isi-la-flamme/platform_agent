@@ -88,30 +88,45 @@ class AgentRuntime:
 
     async def _force_final_response(self, system_prompt: str, instruction: str) -> str:
         short_correction = (
-            "Tu es un assistant concis. REPONDS UNIQUEMENT EN JSON: "
-            "{\"tool\":\"final\",\"args\":{\"content\":\"...\"}}"
+            "Tu es un assistant concis et chaleureux. "
+            "Réponds UNIQUEMENT avec ce format JSON:\n"
+            '{"tool":"final","args":{"content":"ta réponse ici"}}\n\n'
+            "Exemple: {\"tool\":\"final\",\"args\":{\"content\":\"Je vais bien, merci !\"}}"
         )
 
         messages = [
             {"role": "system", "content": short_correction},
-            *self.conversation.get_messages_as_dicts()[-2:],
+            *self.conversation.get_messages_as_dicts()[-3:],
             {"role": "user", "content": instruction},
         ]
 
         raw = await self._safe_chat(messages)
         action = self.parser.parse_action(raw)
 
-        return str(action.args.get("content", "")) or "Réponse directe."
+        content = str(action.args.get("content", "")).strip()
+        
+        # Si le LLM répond du texte brut au lieu de JSON
+        if not content or content in {"...", "null", "none"}:
+            content = raw.strip()
+            # Nettoyer le markdown éventuel
+            for prefix in ["```json", "```", "JSON:", "Réponse:"]:
+                content = content.removeprefix(prefix).strip()
+        
+        # Fallback ultime
+        if not content or len(content) < 2:
+            content = instruction or "Je suis là !"
+            
+        return content
 
     def _needs_final_retry(self, response: str) -> bool:
         normalized = response.strip().lower()
 
         return (
-            normalized in {"", "final", "json", "none", "null", "plan", "tool"}
+            normalized in {"", "final", "json", "none", "null", "plan", "tool", "réponse directe.", "réponse directe"}
             or normalized.startswith("plan actuel")
             or normalized.startswith('{"goal"')
+            or len(normalized) < 3  # ✅ Évite les réponses vides ou trop courtes
         )
-
 
     async def _learn_facts_from_response(self, user_input: str, response: str) -> None:
         """Extrait et stocke les faits mentionnés dans la réponse du LLM."""
