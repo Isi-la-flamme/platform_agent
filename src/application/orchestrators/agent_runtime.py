@@ -192,6 +192,7 @@ class AgentRuntime:
             "effacer", "efface", "modifier", "modifie", "ajouter", "ajoute",
             "écrire", "ecrire", "lis", "lire", "lit", "déplacer", "copier",
             "calcule", "cherche", "recherche"
+            "prix", "cours", "valeur", "script", "code", "python"  # ✅
         ]
         ui = user_input.lower()
         return any(kw in ui for kw in action_keywords)
@@ -223,6 +224,10 @@ class AgentRuntime:
         search_keywords = ["cherche", "recherche", "google", "internet", "web"]
         if any(kw in ui for kw in search_keywords):
             return ("google_search", {"query": user_input})
+        
+        code_keywords = ["script", "code", "python", "programme", "fonction", "algorithme"]
+        if any(kw in ui for kw in code_keywords):
+            return ("python_code", {"code": user_input})
 
         return ("final", {"content": f"Action demandée: {user_input}"})
 
@@ -334,9 +339,38 @@ class AgentRuntime:
                     task.status = "in_progress"
 
 
+            # =========================
             # LLM CALL
+            # =========================
             raw = await self._safe_chat(self._build_messages(system_prompt))
             action = self.parser.parse_action(raw)
+
+            # =========================
+            # ✅ REFUSER FINAL SI ACTION DEMANDÉE
+            # =========================
+            if action.tool == "final" and self._has_action_intent(user_input):
+                response_text = str(action.args.get("content", ""))
+                
+                pretend_keywords = [
+                    "créé", "cree", "supprimé", "supprime", "modifié", "modifie",
+                    "fait", "exécuté", "execute", "écrit", "ecrit", "écris",
+                    "voici le script", "voici le code", "le fichier", "le dossier",
+                    "créer", "creer", "le calcul", "le résultat", "le prix"
+                ]
+                is_pretending = any(kw in response_text.lower() for kw in pretend_keywords)
+                
+                if is_pretending:
+                    self.logger.warning(
+                        f"LLM répond 'final' mais prétend avoir agi. "
+                        f"Réponse: '{response_text[:80]}...' → Forcer tool."
+                    )
+                    forced_tool, forced_args = self._get_forced_tool_for_intent(user_input)
+                    
+                    if forced_tool != "final":
+                        action.tool = forced_tool
+                        action.args = forced_args
+                        self.logger.info(f"Tool forcé: {forced_tool}")
+
 
             # =========================
             # ANTI-ARGS-VIDE

@@ -65,6 +65,9 @@ class CalculatorTool:
         if not expression:
             return "Expression manquante."
 
+        # ✅ Remplacer virgule française par point
+        expression = expression.replace(",", ".")
+
         try:
             tree = ast.parse(expression, mode="eval")
             result = self._evaluate(tree.body)
@@ -74,7 +77,7 @@ class CalculatorTool:
         if result.is_integer():
             return str(int(result))
         return str(result)
-
+    
     def _evaluate(self, node: ast.AST) -> float:
         if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
             return float(node.value)
