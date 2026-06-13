@@ -9,6 +9,7 @@ from tenacity import (
 )
 
 from src.application.orchestrators.conversation_manager import ConversationManager
+from src.application.orchestrators.reflector import Reflector
 from src.application.memory_v2.working_memory import WorkingMemory
 from src.application.orchestrators.memory_manager import MemoryManager
 from src.application.orchestrators.prompt_manager import PromptManager
@@ -51,6 +52,7 @@ class AgentRuntime:
         self.parser = parser or ResponseParser(logger)
         self.prompter = prompter or PromptManager()
         self.memory_v2 = MemoryV2()
+        self.reflector = Reflector(self.llm)  # ✅
         self.executor = executor or ToolExecutor(tools, logger, event_bus=event_bus)
 
         self.scheduler = Scheduler()
@@ -420,6 +422,8 @@ class AgentRuntime:
             # TOOL RESOLUTION
             # =========================
             tool = self.tools.get(tool_name)
+            success = False
+            observation = ""
 
             if not tool:
                 self.logger.warning(
@@ -450,6 +454,62 @@ class AgentRuntime:
                     observation = f"ERROR: {str(e)}"
                     success = False
 
+            # =========================
+            # ✅ RÉFLEXION
+            # =========================
+            goal = task.description if task else user_input
+            evaluation = await self.reflector.evaluate(
+                goal=goal,
+                action_taken=f"{tool_name}({args})",
+                result=observation,
+                success=success,
+            )
+
+            self.logger.info(
+                f"[REFLECTION] status={evaluation['status']} | "
+                f"analysis={evaluation['analysis'][:100]}"
+            )
+
+            # =========================
+            # ✅ REPLANIFICATION
+            # =========================
+            if evaluation["status"] in {"replan", "retry"} and self.current_plan:
+                suggestion = evaluation.get("suggestion", "")
+                self.logger.warning(
+                    f"Replanification demandée: {evaluation['status']} - {suggestion}"
+                )
+                
+                # Ajouter la suggestion comme nouvelle tâche
+                if suggestion and evaluation["status"] == "retry":
+                    # Réessayer avec les suggestions
+                    system_prompt += (
+                        f"\n\n⚠️ RÉFLEXION : {evaluation['analysis']}\n"
+                        f"SUGGESTION : {suggestion}\n"
+                        f"Réessaie avec cette approche."
+                    )
+                    continue  # Réessaie sans changer le plan
+                
+                elif evaluation["status"] == "replan":
+                    # Replanifier complètement
+                    self.current_plan = await self.planner.create_plan(
+                        f"{goal} (échec précédent: {evaluation['analysis']})"
+                    )
+                    continue
+
+            # =========================
+            # GIVE UP
+            # =========================
+            if evaluation["status"] == "give_up":
+                response = (
+                    f"Je n'ai pas réussi à accomplir cette tâche. "
+                    f"Raison : {evaluation['analysis']}"
+                )
+                self.conversation.add_assistant_message(response)
+                if task:
+                    task.status = "failed"
+                return response
+            
+            
             # TASK UPDATE
             if task:
                 task.status = "completed" if success else "failed"

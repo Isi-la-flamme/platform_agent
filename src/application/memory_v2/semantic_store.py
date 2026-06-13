@@ -44,3 +44,6 @@ class SemanticMemory:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored[:limit]]
+    
+    def clear(self):
+        self.store.clear()

@@ -19,3 +19,7 @@ class EpisodicMemory:
 
     def recent(self, limit: int = 10):
         return self.store[-limit:]
+    
+    
+    def clear(self):
+        self.store.clear()
