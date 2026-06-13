@@ -6,6 +6,7 @@ import httpx
 
 
 class WebFetchTool:
+    timeout = 15
     name = "web_fetch"
     description = (
         "Lit une page web publique via une URL HTTP ou HTTPS et retourne son "

@@ -9,6 +9,7 @@ from tenacity import (
 )
 
 from src.application.orchestrators.conversation_manager import ConversationManager
+from src.application.memory_v2.working_memory import WorkingMemory
 from src.application.orchestrators.memory_manager import MemoryManager
 from src.application.orchestrators.prompt_manager import PromptManager
 from src.application.orchestrators.response_parser import ResponseParser
@@ -54,6 +55,7 @@ class AgentRuntime:
 
         self.scheduler = Scheduler()
         self.planner = Planner(self.llm, self.parser)
+        self.working_memory = WorkingMemory(ttl_seconds=300)
 
         self.current_plan: Plan | None = None
         self._last_responses: list[str] = []
@@ -291,7 +293,9 @@ class AgentRuntime:
                 for m in retrieved[:5]
             )
 
+            # =========================
             # PROMPT BUILD
+            # =========================
             system_prompt = self.prompter.build_system_prompt(
                 self.tools,
                 self.memory_manager.memory,
@@ -302,10 +306,16 @@ class AgentRuntime:
             if memory_context:
                 system_prompt += f"\n\nMEMORY V2:\n{memory_context}"
 
+            # ✅ WORKING MEMORY
+            working_context = self.working_memory.get_context_for_prompt()
+            if working_context:
+                system_prompt += working_context
+
             if task:
                 system_prompt += f"\n\nTACHE ACTIVE:\n{task.description}"
                 if task.status == "pending":
                     task.status = "in_progress"
+
 
             # LLM CALL
             raw = await self._safe_chat(self._build_messages(system_prompt))
@@ -444,14 +454,20 @@ class AgentRuntime:
             if task:
                 task.status = "completed" if success else "failed"
 
+            # =========================
             # SKILL MEMORY
+            # =========================
             if success and tool:
                 self.memory_v2.store_skill(
                     task=tool_name,
                     steps=[task.description if task else tool_name, tool_name],
                     success=True,
                 )
-
+                # ✅ WORKING MEMORY
+                self.working_memory.put(
+                    f"resultat_{tool_name}",
+                    str(observation)[:200]
+                )
             # EPISODIC MEMORY
             self.memory_v2.store_episode(user_input, {
                 "type": "tool_execution",
@@ -478,4 +494,5 @@ class AgentRuntime:
         self.current_plan = None
         self._last_responses = []
         self._loop_count = 0
+        self.working_memory.clear()
         self.logger.info("Agent reset")

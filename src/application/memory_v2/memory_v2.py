@@ -124,7 +124,8 @@ class MemoryV2:
                     content=getattr(f, 'text', str(f)),
                     metadata={
                         "key": getattr(f, 'key', ''),
-                        "value": getattr(f, 'value', '')
+                        "value": getattr(f, 'value', ''),
+                        "source": "chromadb"  # ✅ Marqueur pour le bonus vectoriel
                     },
                     timestamp=datetime.utcnow(),
                 ))
