@@ -9,6 +9,9 @@ from tenacity import (
 )
 
 from src.application.orchestrators.conversation_manager import ConversationManager
+from src.domain.entities.permissions import PermissionManager, Role
+from src.application.orchestrators.evaluator import ActionEvaluator
+import time
 from src.application.orchestrators.reflector import Reflector
 from src.application.memory_v2.working_memory import WorkingMemory
 from src.application.orchestrators.memory_manager import MemoryManager
@@ -45,6 +48,9 @@ class AgentRuntime:
         self.logger = logger
         self.tools = tools
         self.event_bus = event_bus
+
+        self.permissions = PermissionManager(current_role=Role.USER)  # ✅
+        self.evaluator = ActionEvaluator()  # ✅
 
         # Core modules
         self.conversation = ConversationManager(self.MAX_MESSAGES)
@@ -236,8 +242,15 @@ class AgentRuntime:
         return None
 
     async def _run_tool(self, tool: Tool, args: dict[str, Any], user_input: str, trace_id: str) -> str:
+        # ✅ Vérification RBAC
+        if not self.permissions.can_execute(tool.name):
+            return f"Accès refusé : vous n'avez pas la permission d'utiliser '{tool.name}'. Rôle actuel: {self.permissions.current_role.value}"
+        
         try:
-            return await self.executor.execute(tool.name, args, user_input, trace_id=trace_id)
+            start = time.time()
+            result = await self.executor.execute(tool.name, args, user_input, trace_id=trace_id)
+            duration = (time.time() - start) * 1000
+            return result
         except ToolExecutionError as e:
             msg = f"ERREUR TOOL : {e}"
             if self.event_bus:
@@ -252,6 +265,8 @@ class AgentRuntime:
         trace_id = str(uuid.uuid4())
 
         self.logger.info(f"Autonomous session started | trace_id={trace_id}")
+
+        metrics = self.evaluator.start_session(trace_id, user_input)
 
         if self.event_bus:
             await self.event_bus.emit(
@@ -402,6 +417,10 @@ class AgentRuntime:
                 if task:
                     task.status = "completed"
 
+                # ✅ MÉTRIQUES FIN DE SESSION
+                summary = self.evaluator.end_session(metrics)
+                self.logger.info(f"\n{summary}")
+
                 return response
 
             # =========================
@@ -448,11 +467,21 @@ class AgentRuntime:
 
             else:
                 try:
+                    start_time = time.time()
                     observation = await self._run_tool(tool, args, user_input, trace_id)
-                    success = True
+                    duration_ms = (time.time() - start_time) * 1000
+                    success = "ERREUR" not in observation and "Échec" not in observation
+                    
+                    # ✅ Enregistrer métrique
+                    self.evaluator.record_action(
+                        metrics, tool_name, success, duration_ms, observation
+                    )
                 except Exception as e:
                     observation = f"ERROR: {str(e)}"
                     success = False
+                    self.evaluator.record_action(
+                        metrics, tool_name, False, 0, observation, error=str(e)
+                    )
 
             # =========================
             # ✅ RÉFLEXION
@@ -464,6 +493,13 @@ class AgentRuntime:
                 result=observation,
                 success=success,
             )
+
+            if evaluation["status"] == "retry":
+                self.evaluator.record_retry(metrics)
+                # ...
+            elif evaluation["status"] == "replan":
+                self.evaluator.record_replan(metrics)
+                # ...
 
             self.logger.info(
                 f"[REFLECTION] status={evaluation['status']} | "
@@ -509,7 +545,7 @@ class AgentRuntime:
                     task.status = "failed"
                 return response
             
-            
+
             # TASK UPDATE
             if task:
                 task.status = "completed" if success else "failed"
