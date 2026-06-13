@@ -191,7 +191,7 @@ class AgentRuntime:
             "créer", "crée", "cree", "creer", "supprimer", "supprime",
             "effacer", "efface", "modifier", "modifie", "ajouter", "ajoute",
             "écrire", "ecrire", "lis", "lire", "lit", "déplacer", "copier",
-            "calcule", "cherche", "recherche"
+            "calcule", "cherche", "recherche", "google", "internet", "web",
             "prix", "cours", "valeur", "script", "code", "python"  # ✅
         ]
         ui = user_input.lower()
@@ -213,7 +213,8 @@ class AgentRuntime:
         if any(kw in ui for kw in calc_keywords):
             return ("calculator", {"expression": user_input})
 
-        crypto_keywords = ["bitcoin", "ethereum", "crypto", "prix", "cours", "btc", "eth"]
+        crypto_keywords = ["bitcoin", "ethereum", "crypto", "prix", "cours", "btc", "eth",
+                          "valeur", "acheter", "vendre"]  # ✅
         if any(kw in ui for kw in crypto_keywords):
             return ("crypto_price", {"symbol": "BTC"})
 
@@ -345,32 +346,20 @@ class AgentRuntime:
             raw = await self._safe_chat(self._build_messages(system_prompt))
             action = self.parser.parse_action(raw)
 
-            # =========================
+                        # =========================
             # ✅ REFUSER FINAL SI ACTION DEMANDÉE
             # =========================
             if action.tool == "final" and self._has_action_intent(user_input):
                 response_text = str(action.args.get("content", ""))
+                self.logger.warning(
+                    f"Action demandée mais LLM répond final: '{response_text[:80]}...' → Forcer tool."
+                )
+                forced_tool, forced_args = self._get_forced_tool_for_intent(user_input)
                 
-                pretend_keywords = [
-                    "créé", "cree", "supprimé", "supprime", "modifié", "modifie",
-                    "fait", "exécuté", "execute", "écrit", "ecrit", "écris",
-                    "voici le script", "voici le code", "le fichier", "le dossier",
-                    "créer", "creer", "le calcul", "le résultat", "le prix"
-                ]
-                is_pretending = any(kw in response_text.lower() for kw in pretend_keywords)
-                
-                if is_pretending:
-                    self.logger.warning(
-                        f"LLM répond 'final' mais prétend avoir agi. "
-                        f"Réponse: '{response_text[:80]}...' → Forcer tool."
-                    )
-                    forced_tool, forced_args = self._get_forced_tool_for_intent(user_input)
-                    
-                    if forced_tool != "final":
-                        action.tool = forced_tool
-                        action.args = forced_args
-                        self.logger.info(f"Tool forcé: {forced_tool}")
-
+                if forced_tool != "final":
+                    action.tool = forced_tool
+                    action.args = forced_args
+                    self.logger.info(f"Tool forcé: {forced_tool} avec args {forced_args}")
 
             # =========================
             # ANTI-ARGS-VIDE
@@ -518,54 +507,68 @@ class AgentRuntime:
                     )
 
             # =========================
-            # ✅ RÉFLEXION
+            # ✅ RÉFLEXION (skip si return_direct + succès)
             # =========================
             goal = task.description if task else user_input
-            evaluation = await self.reflector.evaluate(
-                goal=goal,
-                action_taken=f"{tool_name}({args})",
-                result=observation,
-                success=success,
+            
+            # Ne pas réfléchir sur les tools à retour direct qui ont réussi
+            skip_reflection = (
+                tool and tool.return_direct and success and "ERREUR" not in observation
             )
+            
+            if skip_reflection:
+                evaluation = {"status": "ok", "analysis": "Succès direct", "suggestion": ""}
+            else:
+                evaluation = await self.reflector.evaluate(
+                    goal=goal,
+                    action_taken=f"{tool_name}({args})",
+                    result=observation,
+                    success=success,
+                )
 
             if evaluation["status"] == "retry":
                 self.evaluator.record_retry(metrics)
-                # ...
             elif evaluation["status"] == "replan":
                 self.evaluator.record_replan(metrics)
-                # ...
 
             self.logger.info(
                 f"[REFLECTION] status={evaluation['status']} | "
                 f"analysis={evaluation['analysis'][:100]}"
             )
-
+            
             # =========================
-            # ✅ REPLANIFICATION
+            # ✅ REPLANIFICATION (limité à 1 retry)
             # =========================
+            retry_count = getattr(self, '_retry_count', 0)
+            
             if evaluation["status"] in {"replan", "retry"} and self.current_plan:
-                suggestion = evaluation.get("suggestion", "")
-                self.logger.warning(
-                    f"Replanification demandée: {evaluation['status']} - {suggestion}"
-                )
+                if retry_count >= 1:
+                    self.logger.warning(f"Max retries atteint ({retry_count}), abandon")
+                    response = f"Je n'ai pas réussi après {retry_count} tentative(s). Dernier résultat: {observation}"
+                    self.conversation.add_assistant_message(response)
+                    if task:
+                        task.status = "failed"
+                    return response
                 
-                # Ajouter la suggestion comme nouvelle tâche
-                if suggestion and evaluation["status"] == "retry":
-                    # Réessayer avec les suggestions
+                self._retry_count = retry_count + 1
+                suggestion = evaluation.get("suggestion", "")
+                self.logger.warning(f"Replanification #{retry_count + 1}: {evaluation['status']} - {suggestion}")
+                
+                if evaluation["status"] == "retry":
                     system_prompt += (
                         f"\n\n⚠️ RÉFLEXION : {evaluation['analysis']}\n"
                         f"SUGGESTION : {suggestion}\n"
                         f"Réessaie avec cette approche."
                     )
-                    continue  # Réessaie sans changer le plan
+                    continue
                 
                 elif evaluation["status"] == "replan":
-                    # Replanifier complètement
                     self.current_plan = await self.planner.create_plan(
                         f"{goal} (échec précédent: {evaluation['analysis']})"
                     )
                     continue
-
+                
+            
             # =========================
             # GIVE UP
             # =========================
@@ -624,5 +627,6 @@ class AgentRuntime:
         self.current_plan = None
         self._last_responses = []
         self._loop_count = 0
+        self._retry_count = 0
         self.working_memory.clear()
         self.logger.info("Agent reset")

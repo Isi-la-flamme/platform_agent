@@ -67,7 +67,7 @@ class DateTimeTool:
     }
 
     async def execute(self, **kwargs: Any) -> str:
-        timezone_name = str(kwargs.get("timezone", "") or "").strip()
+        timezone_name = str(kwargs.get("timezone", "") or kwargs.get("timeZone", "") or "").strip()
         country = str(kwargs.get("country", "") or "").strip()
 
         # Si country est fourni, le convertir en timezone

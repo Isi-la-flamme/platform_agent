@@ -41,8 +41,8 @@ class PermissionManager:
             ),
             "python_code": ToolPermission(
                 "python_code",
-                [Role.ADMIN],  # Seul l'admin peut exécuter du code
-                require_confirmation=True,
+                [Role.ADMIN, Role.USER],  # Seul l'admin peut exécuter du code
+                require_confirmation=False,
             ),
             "google_search": ToolPermission("google_search", [Role.ADMIN, Role.USER]),
             "web_fetch": ToolPermission("web_fetch", [Role.ADMIN, Role.USER]),
