@@ -192,7 +192,9 @@ class AgentRuntime:
             "effacer", "efface", "modifier", "modifie", "ajouter", "ajoute",
             "écrire", "ecrire", "lis", "lire", "lit", "déplacer", "copier",
             "calcule", "cherche", "recherche", "google", "internet", "web",
-            "prix", "cours", "valeur", "script", "code", "python"  # ✅
+            "prix", "cours", "valeur", "script", "code", "python", "programme",
+            "fonction", "algorithme", "heure", "date", "aujourd'hui", "demain", # ✅
+            "heure", "date", "aujourd'hui", "demain"  # ✅
         ]
         ui = user_input.lower()
         return any(kw in ui for kw in action_keywords)
@@ -218,7 +220,8 @@ class AgentRuntime:
         if any(kw in ui for kw in crypto_keywords):
             return ("crypto_price", {"symbol": "BTC"})
 
-        time_keywords = ["heure", "date", "aujourd'hui", "demain", "quel jour"]
+        time_keywords = ["heure", "date", "aujourd'hui", "demain", "quel jour", "quel jour de", "quel mois", "quelle année"
+                         "time", "date", "day", "month", "year", ]  # ✅
         if any(kw in ui for kw in time_keywords):
             return ("datetime", {"format": "%H:%M"})
 

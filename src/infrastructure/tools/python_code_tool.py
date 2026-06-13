@@ -56,6 +56,10 @@ class PythonCodeTool:
         code = str(kwargs.get("code", "")).strip()
         if not code:
             return "Erreur: Aucun code fourni."
+        
+        # ✅ Si le code contient du langage naturel, essayer d'extraire le code
+        if not any(kw in code for kw in ["print", "def ", "import ", "=", "class "]):
+            return f"Ceci ne semble pas être du code Python valide: '{code[:50]}...'"
             
         # 1. Whitelist / Blacklist statique du code
         for forbidden in self.FORBIDDEN_KEYWORDS:
